@@ -12,6 +12,7 @@ struct DetectionResult {
     let gateY: Int
     let componentBounds: CGRect
     let thumbnailData: Data?
+    let isLandscapeBuffer: Bool
 }
 
 // MARK: - Internal Types
@@ -227,6 +228,25 @@ final class DetectionEngine {
 
         guard let candidate = best else { return nil }
 
+        // Body-part suppression (spec 6.4):
+        // If a larger size-qualified component exists in the frame that hasn't reached
+        // the gate yet but is approaching, suppress this detection and wait for it.
+        let approachZone = Int(Float(W) * 0.20) // within 20% of frame width
+        for comp in components {
+            guard comp.height >= minH, comp.width >= minW else { continue }
+            guard comp.area > candidate.comp.area else { continue }
+            // This larger component must NOT be at the gate
+            guard comp.maxX < gMin || comp.minX > gMax else { continue }
+            // Check if it's approaching the gate (leading edge within approach zone)
+            let leadingEdge = comp.maxX < gMin ? comp.maxX : comp.minX
+            let distToGate = comp.maxX < gMin ? (gMin - comp.maxX) : (comp.minX - gMax)
+            if distToGate <= approachZone {
+                logReject("body_part_suppression",
+                          detail: "gate_area=\(candidate.comp.area) approaching_area=\(comp.area) dist=\(distToGate)")
+                return nil
+            }
+        }
+
         // 6. Interpolate time
         let prevSec = CMTimeGetSeconds(previousTimestamp)
         var crossingTime = (now + prevSec) / 2.0 - start
@@ -247,11 +267,6 @@ final class DetectionEngine {
         print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f cands=%d area=%d detY=%d frame=%d time=%.3f",
                      c.width, c.height, hR, wR, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
 
-        // Thumbnail (color, from BGRA buffer)
-        let thumbData = colorThumbnail(base: base, fullW: fullW, fullH: fullH, bpr: bpr,
-                                       w: W, h: H, transpose: isLandscape,
-                                       mirrorX: isFrontCamera)
-
         return DetectionResult(
             crossingTime: crossingTime,
             frameTimestamp: timestamp,
@@ -262,7 +277,8 @@ final class DetectionEngine {
                 width:  CGFloat(c.width)  / CGFloat(W),
                 height: CGFloat(c.height) / CGFloat(H)
             ),
-            thumbnailData: thumbData
+            thumbnailData: nil,
+            isLandscapeBuffer: isLandscape
         )
     }
 
@@ -300,13 +316,23 @@ final class DetectionEngine {
         }
     }
 
-    // MARK: - Color Thumbnail (from BGRA, matching reference project)
+    // MARK: - Color Thumbnail (from BGRA, callable externally)
 
-    private func colorThumbnail(
-        base: UnsafeMutableRawPointer, fullW: Int, fullH: Int, bpr: Int,
-        w: Int, h: Int, transpose: Bool, mirrorX: Bool = false
+    static func colorThumbnail(
+        from pixelBuffer: CVPixelBuffer,
+        transpose: Bool, mirrorX: Bool = false,
+        thumbWidth: Int = 180, thumbHeight: Int = 320, scale: Int = 4
     ) -> Data? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let fullW = CVPixelBufferGetWidth(pixelBuffer)
+        let fullH = CVPixelBufferGetHeight(pixelBuffer)
+        let bpr   = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+
         let src = base.assumingMemoryBound(to: UInt8.self)
+        let w = thumbWidth, h = thumbHeight
         let s = scale
 
         guard let context = CGContext(
@@ -442,41 +468,75 @@ final class DetectionEngine {
         return Array(map.values)
     }
 
-    // MARK: - Gate Analysis
+    // MARK: - Gate Analysis (leading-edge scan per spec 6.2-6.3)
 
     private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
         let W = processWidth
+        let minSupport = max(3, Int(Float(comp.height) * localSupportFraction))
+
+        // Determine scan direction: from the leading edge toward the interior.
+        // If component center is left of gate → moving right → leading edge is on the right (maxX) side
+        // Scan gate columns from the side closest to the leading edge inward.
+        let compCenterX = (comp.minX + comp.maxX) / 2
+        let movingRight = compCenterX < gateColumn
+
+        // Order gate columns from leading edge side to trailing edge side
+        let columns: [Int]
+        if movingRight {
+            // Leading edge is on the right → scan gate band from right to left
+            columns = (gMin...gMax).reversed().map { $0 }
+        } else {
+            // Leading edge is on the left → scan gate band from left to right
+            columns = (gMin...gMax).map { $0 }
+        }
+
         var bestRun = 0
         var bestMid = 0
 
-        for gx in gMin...gMax {
+        for gx in columns {
             guard gx >= 0, gx < W else { continue }
             var runStart = -1
             var runLen   = 0
+            var colBestRun = 0
+            var colBestMid = 0
 
             for y in comp.minY...comp.maxY {
                 if maskBuf[y * W + gx] != 0 {
                     if runStart < 0 { runStart = y }
                     runLen += 1
                 } else {
-                    if runLen > bestRun {
-                        bestRun = runLen
-                        bestMid = runStart + runLen / 2
+                    if runLen > colBestRun {
+                        colBestRun = runLen
+                        colBestMid = runStart + runLen / 2
                     }
                     runStart = -1; runLen = 0
                 }
             }
-            if runLen > bestRun {
-                bestRun = runLen
-                bestMid = runStart + runLen / 2
+            if runLen > colBestRun {
+                colBestRun = runLen
+                colBestMid = runStart + runLen / 2
+            }
+
+            // Track overall best run (for reject logging)
+            if colBestRun > bestRun {
+                bestRun = colBestRun
+                bestMid = colBestMid
+            }
+
+            // Accept the FIRST column (from leading edge) that meets local support
+            if colBestRun >= minSupport {
+                return GateAnalysis(
+                    hasQualifyingSlice: true,
+                    detectionY: colBestMid,
+                    maxVerticalRun: colBestRun
+                )
             }
         }
 
+        // No column qualified — return best run for logging
         guard bestRun > 0 else { return nil }
-
-        let minSupport = max(3, Int(Float(comp.height) * localSupportFraction))
         return GateAnalysis(
-            hasQualifyingSlice: bestRun >= minSupport,
+            hasQualifyingSlice: false,
             detectionY: bestMid,
             maxVerticalRun: bestRun
         )

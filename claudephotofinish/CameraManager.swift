@@ -37,6 +37,13 @@ final class CameraManager: NSObject, ObservableObject {
     private let motionThreshold: Double = 0.15
     private var stableTimer: Timer?
 
+    // MARK: Thumbnail
+
+    private let thumbnailQueue = DispatchQueue(
+        label: "com.claudephotofinish.thumbnail",
+        qos: .utility
+    )
+
     // MARK: Timer
 
     private var timerStart: Date?
@@ -236,18 +243,50 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         // Beep on detection
         AudioServicesPlaySystemSound(1052)
 
+        // Capture pixel buffer for async thumbnail creation (ARC retains it)
+        let pixelBuffer = pb
+        let isFront = engine.isFrontCamera
+        let isLandscape = result.isLandscapeBuffer
+        let crossingNumber: Int = {
+            // Quick read — safe because main thread only appends
+            DispatchQueue.main.sync { self.crossings.count + 1 }
+        }()
+
+        // Add record immediately with nil thumbnail
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let record = LapRecord(
                 id: UUID(),
-                crossingNumber: self.crossings.count + 1,
+                crossingNumber: crossingNumber,
                 time: result.crossingTime,
-                thumbnailData: result.thumbnailData,
+                thumbnailData: nil,
                 gateY: result.gateY,
                 componentBounds: result.componentBounds
             )
             self.crossings.append(record)
             print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
+        }
+
+        // Generate thumbnail asynchronously
+        thumbnailQueue.async { [weak self] in
+            let thumbData = DetectionEngine.colorThumbnail(
+                from: pixelBuffer, transpose: isLandscape, mirrorX: isFront
+            )
+
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let idx = crossingNumber - 1
+                if idx < self.crossings.count {
+                    self.crossings[idx] = LapRecord(
+                        id: self.crossings[idx].id,
+                        crossingNumber: self.crossings[idx].crossingNumber,
+                        time: self.crossings[idx].time,
+                        thumbnailData: thumbData,
+                        gateY: self.crossings[idx].gateY,
+                        componentBounds: self.crossings[idx].componentBounds
+                    )
+                }
+            }
         }
     }
 }
