@@ -247,17 +247,14 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let pixelBuffer = pb
         let isFront = engine.isFrontCamera
         let isLandscape = result.isLandscapeBuffer
-        let crossingNumber: Int = {
-            // Quick read — safe because main thread only appends
-            DispatchQueue.main.sync { self.crossings.count + 1 }
-        }()
+        let recordId = UUID()
 
-        // Add record immediately with nil thumbnail
+        // Add record with nil thumbnail, generate thumbnail async
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let record = LapRecord(
-                id: UUID(),
-                crossingNumber: crossingNumber,
+                id: recordId,
+                crossingNumber: self.crossings.count + 1,
                 time: result.crossingTime,
                 thumbnailData: nil,
                 gateY: result.gateY,
@@ -267,7 +264,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
         }
 
-        // Generate thumbnail asynchronously
+        // Generate thumbnail asynchronously on a low-priority queue
         thumbnailQueue.async { [weak self] in
             let thumbData = DetectionEngine.colorThumbnail(
                 from: pixelBuffer, transpose: isLandscape, mirrorX: isFront
@@ -275,15 +272,15 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
             DispatchQueue.main.async {
                 guard let self else { return }
-                let idx = crossingNumber - 1
-                if idx < self.crossings.count {
+                if let idx = self.crossings.firstIndex(where: { $0.id == recordId }) {
+                    let old = self.crossings[idx]
                     self.crossings[idx] = LapRecord(
-                        id: self.crossings[idx].id,
-                        crossingNumber: self.crossings[idx].crossingNumber,
-                        time: self.crossings[idx].time,
+                        id: old.id,
+                        crossingNumber: old.crossingNumber,
+                        time: old.time,
                         thumbnailData: thumbData,
-                        gateY: self.crossings[idx].gateY,
-                        componentBounds: self.crossings[idx].componentBounds
+                        gateY: old.gateY,
+                        componentBounds: old.componentBounds
                     )
                 }
             }

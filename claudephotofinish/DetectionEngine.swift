@@ -61,6 +61,7 @@ final class DetectionEngine {
     private let heightFraction: Float   = 0.30
     private let widthFraction:  Float   = 0.08
     private let localSupportFraction: Float = 0.15
+    private let minFillRatio: Float = 0.25       // reject sparse blobs (hand swipes)
 
     // Gate
     private var gateColumn: Int { processWidth / 2 }
@@ -208,6 +209,11 @@ final class DetectionEngine {
                 logReject("width", detail: "\(comp.width)/\(minW)")
                 continue
             }
+            let fillRatio = Float(comp.area) / Float(comp.width * comp.height)
+            if fillRatio < minFillRatio {
+                logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d", fillRatio, minFillRatio, comp.area))
+                continue
+            }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
                 logReject("no_gate_intersection")
                 continue
@@ -264,8 +270,9 @@ final class DetectionEngine {
         let hR = Float(c.height) / Float(H)
         let wR = Float(c.width) / Float(W)
 
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f cands=%d area=%d detY=%d frame=%d time=%.3f",
-                     c.width, c.height, hR, wR, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
+        let fR = Float(c.area) / Float(c.width * c.height)
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f cands=%d area=%d detY=%d frame=%d time=%.3f",
+                     c.width, c.height, hR, wR, fR, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
 
         return DetectionResult(
             crossingTime: crossingTime,
