@@ -197,8 +197,9 @@ final class DetectionEngine {
         let gMin = max(gateColumn - gateBandHalf, 0)
         let gMax = min(gateColumn + gateBandHalf, W - 1)
 
-        var best: (comp: Component, detY: Int)?
+        var best: (comp: Component, detY: Int, run: Int)?
         var candidateCount = 0
+        let frameAbsMin = Int(Float(H) * minGateHeightFraction)
 
         for comp in components {
             if comp.height < minH {
@@ -223,11 +224,12 @@ final class DetectionEngine {
                 if analysis.hasQualifyingSlice {
                     candidateCount += 1
                     if best == nil || comp.area > best!.comp.area {
-                        best = (comp, analysis.detectionY)
+                        best = (comp, analysis.detectionY, analysis.maxVerticalRun)
                     }
                 } else {
+                    let need = max(3, Int(Float(comp.height) * localSupportFraction), frameAbsMin)
                     logReject("local_support",
-                              detail: "run=\(analysis.maxVerticalRun) need=\(max(3, Int(Float(comp.height) * localSupportFraction)))")
+                              detail: "run=\(analysis.maxVerticalRun) need=\(need)")
                 }
             }
         }
@@ -253,11 +255,33 @@ final class DetectionEngine {
             }
         }
 
-        // 6. Interpolate time
+        // 6. Position-based interpolation (spec 7.1)
+        // At the detection row (detY), find the continuous horizontal run of mask
+        // pixels containing the gate. This is the leading-edge strip — its extent
+        // on each side of the gate gives the distances for interpolation.
+        let detRow = candidate.detY
         let prevSec = CMTimeGetSeconds(previousTimestamp)
-        var crossingTime = (now + prevSec) / 2.0 - start
+        let dt = now - prevSec
 
-        // Low-light exposure correction
+        var runLeftX = gateColumn
+        var runRightX = gateColumn
+
+        // Scan left from gate
+        var x = gateColumn - 1
+        while x >= 0 && maskBuf[detRow * W + x] != 0 { runLeftX = x; x -= 1 }
+        // Scan right from gate
+        x = gateColumn + 1
+        while x < W && maskBuf[detRow * W + x] != 0 { runRightX = x; x += 1 }
+
+        let dBefore = Float(gateColumn - runLeftX) // distance from body front in N-1 to gate
+        let dAfter  = Float(runRightX - gateColumn) // distance from gate to body front in N
+        let stripWidth = dBefore + dAfter
+
+        var crossingTime: TimeInterval
+        let fraction = stripWidth > 0 ? Double(dBefore / stripWidth) : 0.5
+        crossingTime = prevSec + fraction * dt - start
+
+        // Low-light exposure correction (spec 7.3)
         if let exp = exposureDuration ?? previousExposureDuration {
             let expSec = CMTimeGetSeconds(exp)
             if expSec > 0.002 { crossingTime += 0.75 * expSec }
@@ -271,8 +295,8 @@ final class DetectionEngine {
         let wR = Float(c.width) / Float(W)
 
         let fR = Float(c.area) / Float(c.width * c.height)
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f cands=%d area=%d detY=%d frame=%d time=%.3f",
-                     c.width, c.height, hR, wR, fR, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f cands=%d area=%d detY=%d frame=%d time=%.3f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
 
         return DetectionResult(
             crossingTime: crossingTime,
@@ -305,8 +329,8 @@ final class DetectionEngine {
                 for tx in 0..<w {
                     let bufY = tx * s
                     let px = bufY * bpr + bufX * 4
-                    // BGRA: B=px, G=px+1, R=px+2
-                    let gray = (Int(src[px + 2]) * 77 + Int(src[px + 1]) * 150 + Int(src[px]) * 29) >> 8
+                    // BGRA: B=px, G=px+1, R=px+2 — BT.709 luma for HD
+                    let gray = (Int(src[px + 2]) * 54 + Int(src[px + 1]) * 183 + Int(src[px]) * 19) >> 8
                     dest[ty * w + tx] = UInt8(gray)
                 }
             }
@@ -316,7 +340,7 @@ final class DetectionEngine {
                 let rowOff = ty * s * bpr
                 for tx in 0..<w {
                     let px = rowOff + tx * s * 4
-                    let gray = (Int(src[px + 2]) * 77 + Int(src[px + 1]) * 150 + Int(src[px]) * 29) >> 8
+                    let gray = (Int(src[px + 2]) * 54 + Int(src[px + 1]) * 183 + Int(src[px]) * 19) >> 8
                     dest[ty * w + tx] = UInt8(gray)
                 }
             }
@@ -328,7 +352,7 @@ final class DetectionEngine {
     static func colorThumbnail(
         from pixelBuffer: CVPixelBuffer,
         transpose: Bool, mirrorX: Bool = false,
-        thumbWidth: Int = 180, thumbHeight: Int = 320, scale: Int = 4
+        thumbWidth: Int = 90, thumbHeight: Int = 160, scale: Int = 8
     ) -> Data? {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
@@ -392,94 +416,122 @@ final class DetectionEngine {
         return mutableData as Data
     }
 
-    // MARK: - Connected Components (8-way, union-find)
+    // MARK: - Connected Components (8-way, union-find, optimized)
+
+    private var parentBuf = [Int32]()
+    private var compBuf   = [Component]()
 
     private func findComponents() -> [Component] {
         let W = processWidth, H = processHeight
         let count = W * H
 
-        for i in 0..<count { labels[i] = 0 }
+        labels.withUnsafeMutableBufferPointer { lp in
+            for i in 0..<count { lp[i] = 0 }
+        }
 
         var nextLabel: Int32 = 1
-        var parent = [Int32](repeating: 0, count: count / 4 + 256)
-
-        func ensure(_ cap: Int) {
-            if cap >= parent.count {
-                parent.append(contentsOf: [Int32](repeating: 0, count: cap - parent.count + 256))
-            }
+        let maxLabels = count / 4 + 256
+        if parentBuf.count < maxLabels {
+            parentBuf = [Int32](repeating: 0, count: maxLabels)
+        }
+        if compBuf.count < maxLabels {
+            compBuf = [Component](repeating: Component(), count: maxLabels)
         }
 
-        func find(_ x: Int32) -> Int32 {
-            var r = x
-            while parent[Int(r)] != r { r = parent[Int(r)] }
-            var c = x
-            while c != r {
-                let n = parent[Int(c)]
-                parent[Int(c)] = r
-                c = n
-            }
-            return r
-        }
+        // Use unsafe pointers throughout to avoid bounds checks
+        parentBuf.withUnsafeMutableBufferPointer { pp in
+            labels.withUnsafeMutableBufferPointer { lp in
+                maskBuf.withUnsafeBufferPointer { mp in
 
-        func union(_ a: Int32, _ b: Int32) {
-            let ra = find(a), rb = find(b)
-            if ra != rb { parent[Int(ra)] = rb }
-        }
+                    func find(_ x: Int32) -> Int32 {
+                        var r = x
+                        while pp[Int(r)] != r { r = pp[Int(r)] }
+                        var c = x
+                        while c != r { let n = pp[Int(c)]; pp[Int(c)] = r; c = n }
+                        return r
+                    }
 
-        for y in 0..<H {
-            for x in 0..<W {
-                let idx = y * W + x
-                guard maskBuf[idx] != 0 else { continue }
+                    func union(_ a: Int32, _ b: Int32) {
+                        let ra = find(a), rb = find(b)
+                        if ra != rb { pp[Int(ra)] = rb }
+                    }
 
-                var neighbors = [Int32]()
-                if y > 0 && x > 0   { let l = labels[(y-1)*W+(x-1)]; if l > 0 { neighbors.append(l) } }
-                if y > 0             { let l = labels[(y-1)*W+x];     if l > 0 { neighbors.append(l) } }
-                if y > 0 && x < W-1 { let l = labels[(y-1)*W+(x+1)]; if l > 0 { neighbors.append(l) } }
-                if x > 0             { let l = labels[y*W+(x-1)];     if l > 0 { neighbors.append(l) } }
+                    // Fixed-size neighbor buffer (max 4 for 8-way: TL, T, TR, L)
+                    var nCount: Int = 0
+                    var n0: Int32 = 0, n1: Int32 = 0, n2: Int32 = 0, n3: Int32 = 0
 
-                if neighbors.isEmpty {
-                    let lbl = nextLabel
-                    ensure(Int(lbl))
-                    parent[Int(lbl)] = lbl
-                    labels[idx] = lbl
-                    nextLabel += 1
-                } else {
-                    let minL = neighbors.min()!
-                    labels[idx] = minL
-                    for n in neighbors { union(n, minL) }
+                    for y in 0..<H {
+                        for x in 0..<W {
+                            let idx = y * W + x
+                            guard mp[idx] != 0 else { continue }
+
+                            nCount = 0
+                            if y > 0 && x > 0   { let l = lp[(y-1)*W+(x-1)]; if l > 0 { n0 = l; nCount = 1 } }
+                            if y > 0             { let l = lp[(y-1)*W+x];     if l > 0 { switch nCount { case 0: n0 = l; case 1: n1 = l; case 2: n2 = l; default: n3 = l }; nCount += 1 } }
+                            if y > 0 && x < W-1 { let l = lp[(y-1)*W+(x+1)]; if l > 0 { switch nCount { case 0: n0 = l; case 1: n1 = l; case 2: n2 = l; default: n3 = l }; nCount += 1 } }
+                            if x > 0             { let l = lp[y*W+(x-1)];     if l > 0 { switch nCount { case 0: n0 = l; case 1: n1 = l; case 2: n2 = l; default: n3 = l }; nCount += 1 } }
+
+                            if nCount == 0 {
+                                let lbl = nextLabel
+                                pp[Int(lbl)] = lbl
+                                lp[idx] = lbl
+                                nextLabel += 1
+                            } else {
+                                let minL = nCount == 1 ? n0 :
+                                           nCount == 2 ? min(n0, n1) :
+                                           nCount == 3 ? min(n0, min(n1, n2)) :
+                                           min(n0, min(n1, min(n2, n3)))
+                                lp[idx] = minL
+                                if nCount >= 2 { union(n1, minL) }
+                                if nCount >= 3 { union(n2, minL) }
+                                if nCount >= 4 { union(n3, minL) }
+                            }
+                        }
+                    }
+
+                    // Pass 2: resolve labels and gather stats into array
+                    // Reset comp stats for used labels
+                    for i in 1..<Int(nextLabel) {
+                        compBuf[i] = Component()
+                    }
+
+                    for y in 0..<H {
+                        for x in 0..<W {
+                            let idx = y * W + x
+                            let lbl = lp[idx]
+                            guard lbl > 0 else { continue }
+                            let root = find(lbl)
+                            lp[idx] = root
+                            let ri = Int(root)
+                            if x < compBuf[ri].minX { compBuf[ri].minX = x }
+                            if x > compBuf[ri].maxX { compBuf[ri].maxX = x }
+                            if y < compBuf[ri].minY { compBuf[ri].minY = y }
+                            if y > compBuf[ri].maxY { compBuf[ri].maxY = y }
+                            compBuf[ri].area += 1
+                        }
+                    }
                 }
             }
         }
 
-        var map = [Int32: Component]()
-
-        for y in 0..<H {
-            for x in 0..<W {
-                let idx = y * W + x
-                let lbl = labels[idx]
-                guard lbl > 0 else { continue }
-                let root = find(lbl)
-                labels[idx] = root
-
-                if map[root] == nil { map[root] = Component() }
-                var c = map[root]!
-                c.minX = min(c.minX, x)
-                c.maxX = max(c.maxX, x)
-                c.minY = min(c.minY, y)
-                c.maxY = max(c.maxY, y)
-                c.area += 1
-                map[root] = c
+        // Collect non-empty components
+        var result = [Component]()
+        for i in 1..<Int(nextLabel) {
+            if compBuf[i].area > 0 {
+                result.append(compBuf[i])
             }
         }
-
-        return Array(map.values)
+        return result
     }
 
     // MARK: - Gate Analysis (leading-edge scan per spec 6.2-6.3)
 
+    private let minGateHeightFraction: Float = 0.08 // frame-absolute floor for gate support
+
     private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
-        let W = processWidth
-        let minSupport = max(3, Int(Float(comp.height) * localSupportFraction))
+        let W = processWidth, H = processHeight
+        let minSupport = max(3, Int(Float(comp.height) * localSupportFraction),
+                             Int(Float(H) * minGateHeightFraction))
 
         // Determine scan direction: from the leading edge toward the interior.
         // If component center is left of gate → moving right → leading edge is on the right (maxX) side

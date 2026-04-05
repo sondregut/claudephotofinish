@@ -37,13 +37,6 @@ final class CameraManager: NSObject, ObservableObject {
     private let motionThreshold: Double = 0.15
     private var stableTimer: Timer?
 
-    // MARK: Thumbnail
-
-    private let thumbnailQueue = DispatchQueue(
-        label: "com.claudephotofinish.thumbnail",
-        qos: .utility
-    )
-
     // MARK: Timer
 
     private var timerStart: Date?
@@ -240,50 +233,27 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
         }
 
-        // Beep on detection
-        AudioServicesPlaySystemSound(1052)
+        // Beep on detection (dispatch off processing queue to avoid blocking)
+        DispatchQueue.main.async { AudioServicesPlaySystemSound(1052) }
 
-        // Capture pixel buffer for async thumbnail creation (ARC retains it)
-        let pixelBuffer = pb
-        let isFront = engine.isFrontCamera
-        let isLandscape = result.isLandscapeBuffer
-        let recordId = UUID()
+        // Generate thumbnail inline (90x160 is fast enough) to avoid
+        // retaining CVPixelBuffer across queues, which causes OutOfBuffers drops
+        let thumbData = DetectionEngine.colorThumbnail(
+            from: pb, transpose: result.isLandscapeBuffer, mirrorX: engine.isFrontCamera
+        )
 
-        // Add record with nil thumbnail, generate thumbnail async
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             let record = LapRecord(
-                id: recordId,
+                id: UUID(),
                 crossingNumber: self.crossings.count + 1,
                 time: result.crossingTime,
-                thumbnailData: nil,
+                thumbnailData: thumbData,
                 gateY: result.gateY,
                 componentBounds: result.componentBounds
             )
             self.crossings.append(record)
             print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
-        }
-
-        // Generate thumbnail asynchronously on a low-priority queue
-        thumbnailQueue.async { [weak self] in
-            let thumbData = DetectionEngine.colorThumbnail(
-                from: pixelBuffer, transpose: isLandscape, mirrorX: isFront
-            )
-
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let idx = self.crossings.firstIndex(where: { $0.id == recordId }) {
-                    let old = self.crossings[idx]
-                    self.crossings[idx] = LapRecord(
-                        id: old.id,
-                        crossingNumber: old.crossingNumber,
-                        time: old.time,
-                        thumbnailData: thumbData,
-                        gateY: old.gateY,
-                        componentBounds: old.componentBounds
-                    )
-                }
-            }
         }
     }
 }
