@@ -14,7 +14,7 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var isDetecting      = false
     @Published var cameraPosition: AVCaptureDevice.Position = .back
     @Published var crossings: [LapRecord] = []
-    @Published var elapsedTime: TimeInterval = 0
+    @Published private(set) var timerStart: Date? = nil
     @Published var runNumber: Int = 1
 
     // MARK: Camera
@@ -39,9 +39,8 @@ final class CameraManager: NSObject, ObservableObject {
 
     // MARK: Timer
 
-    private var timerStart: Date?
-    private var displayLink: Timer?
     private var frameCount: Int = 0
+    private var droppedFrameCount: Int = 0
 
     // MARK: Init
 
@@ -53,7 +52,6 @@ final class CameraManager: NSObject, ObservableObject {
 
     deinit {
         motionManager.stopDeviceMotionUpdates()
-        displayLink?.invalidate()
     }
 
     // MARK: - Session
@@ -64,9 +62,9 @@ final class CameraManager: NSObject, ObservableObject {
 
         addCamera(position: .back)
 
-        // Use BGRA so we can create correct color thumbnails
+        // 420v: native Y plane for grayscale detection, CbCr for color thumbnails
         videoOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.setSampleBufferDelegate(self, queue: processingQueue)
@@ -150,31 +148,27 @@ final class CameraManager: NSObject, ObservableObject {
     func startDetection() {
         crossings = []
         timerStart = Date()
-        elapsedTime = 0
         frameCount = 0
         engine.isFrontCamera = (cameraPosition == .front)
         engine.start()
         isDetecting = true
         print("[SESSION] detection started, run #\(runNumber)")
 
-        displayLink?.invalidate()
-        displayLink = Timer.scheduledTimer(withTimeInterval: 1.0 / 100.0, repeats: true) { [weak self] _ in
-            guard let self, let start = self.timerStart else { return }
-            self.elapsedTime = Date().timeIntervalSince(start)
-        }
+        // Pre-warm CGContext + JPEG encoder on background thread
+        // to eliminate first-detection cold start frame drops
+        processingQueue.async { DetectionEngine.prewarmThumbnail() }
     }
 
     func stopDetection() {
         engine.stop()
         isDetecting = false
-        displayLink?.invalidate()
         print("[SESSION] detection stopped, \(crossings.count) crossings recorded")
     }
 
     func resetSession() {
         stopDetection()
         crossings = []
-        elapsedTime = 0
+        timerStart = nil
         runNumber += 1
         engine.reset()
         print("[SESSION] reset, starting run #\(runNumber)")
@@ -184,7 +178,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func startMotionTracking() {
         guard motionManager.isDeviceMotionAvailable else { return }
-        motionManager.deviceMotionUpdateInterval = 1.0 / 30.0
+        motionManager.deviceMotionUpdateInterval = 1.0 / 10.0
         motionManager.startDeviceMotionUpdates(to: .main) { [weak self] motion, _ in
             guard let self, let m = motion else { return }
             let a = m.userAcceleration
@@ -210,11 +204,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         didDrop sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
-        var reason = "unknown"
-        if let attachment = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_DroppedFrameReason, attachmentModeOut: nil) {
-            reason = attachment as! String
-        }
-        print("[FRAME_DROP] reason=\(reason) frame=\(frameCount)")
+        // Count drops silently — logging each one on the serial processing queue
+        // creates a cascade where the log I/O keeps the queue busy, causing more drops.
+        droppedFrameCount += 1
     }
 
     func captureOutput(
@@ -223,6 +215,13 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         guard isDetecting, isPhoneStable else { return }
+
+        // Log accumulated frame drops as a single summary
+        if droppedFrameCount > 0 {
+            print("[FRAME_DROP] \(droppedFrameCount) frames dropped since frame \(frameCount)")
+            droppedFrameCount = 0
+        }
+
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let ts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -236,24 +235,73 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         // Beep on detection (dispatch off processing queue to avoid blocking)
         DispatchQueue.main.async { AudioServicesPlaySystemSound(1052) }
 
-        // Generate thumbnail inline (90x160 is fast enough) to avoid
-        // retaining CVPixelBuffer across queues, which causes OutOfBuffers drops
-        let thumbData = DetectionEngine.colorThumbnail(
-            from: pb, transpose: result.isLandscapeBuffer, mirrorX: engine.isFrontCamera
-        )
+        // Copy Y + CbCr plane data so thumbnail can be generated off the processing queue.
+        // This prevents the JPEG encode from blocking the next frame.
+        let isFront = engine.isFrontCamera
+        let isLandscape = result.isLandscapeBuffer
+        let planeCopy = Self.copyYUVPlanes(from: pb)
 
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            let record = LapRecord(
-                id: UUID(),
-                crossingNumber: self.crossings.count + 1,
-                time: result.crossingTime,
-                thumbnailData: thumbData,
-                gateY: result.gateY,
-                componentBounds: result.componentBounds
-            )
-            self.crossings.append(record)
-            print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
+        DispatchQueue.global(qos: .utility).async {
+            var thumbData: Data? = nil
+            if let planes = planeCopy {
+                thumbData = DetectionEngine.colorThumbnailFromPlanes(
+                    yData: planes.yData, yBpr: planes.yBpr,
+                    cbcrData: planes.cbcrData, cbcrBpr: planes.cbcrBpr,
+                    fullW: planes.width, fullH: planes.height,
+                    transpose: isLandscape, mirrorX: isFront
+                )
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                let record = LapRecord(
+                    id: UUID(),
+                    crossingNumber: self.crossings.count + 1,
+                    time: result.crossingTime,
+                    thumbnailData: thumbData,
+                    gateY: result.gateY,
+                    componentBounds: result.componentBounds
+                )
+                self.crossings.append(record)
+                print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
+            }
         }
+    }
+
+    // MARK: - YUV Plane Copy
+
+    struct YUVPlaneCopy {
+        let yData: Data
+        let yBpr: Int
+        let cbcrData: Data
+        let cbcrBpr: Int
+        let width: Int
+        let height: Int
+    }
+
+    /// Copy Y and CbCr plane bytes so thumbnail can be generated on another queue
+    /// without retaining the CVPixelBuffer (which would stall the capture pipeline).
+    static func copyYUVPlanes(from pb: CVPixelBuffer) -> YUVPlaneCopy? {
+        guard CVPixelBufferGetPlaneCount(pb) >= 2 else { return nil }
+
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+
+        let yBpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 0)
+        let yH   = CVPixelBufferGetHeightOfPlane(pb, 0)
+        let yW   = CVPixelBufferGetWidthOfPlane(pb, 0)
+        guard let yBase = CVPixelBufferGetBaseAddressOfPlane(pb, 0) else { return nil }
+        let yData = Data(bytes: yBase, count: yBpr * yH)
+
+        let cbcrBpr = CVPixelBufferGetBytesPerRowOfPlane(pb, 1)
+        let cbcrH   = CVPixelBufferGetHeightOfPlane(pb, 1)
+        guard let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(pb, 1) else { return nil }
+        let cbcrData = Data(bytes: cbcrBase, count: cbcrBpr * cbcrH)
+
+        return YUVPlaneCopy(
+            yData: yData, yBpr: yBpr,
+            cbcrData: cbcrData, cbcrBpr: cbcrBpr,
+            width: yW, height: yH
+        )
     }
 }

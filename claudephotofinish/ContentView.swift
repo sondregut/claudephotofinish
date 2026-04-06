@@ -120,15 +120,18 @@ struct ContentView: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.secondary)
 
-                HStack(alignment: .lastTextBaseline, spacing: 0) {
-                    Text(formatTimeMajor(camera.elapsedTime))
-                        .font(.system(size: 48, weight: .bold, design: .monospaced))
-                    Text(formatTimeMinor(camera.elapsedTime))
-                        .font(.system(size: 28, weight: .semibold, design: .monospaced))
-                        .opacity(0.5)
+                TimelineView(.periodic(from: .now, by: 1.0 / 15.0)) { context in
+                    let elapsed = camera.timerStart.map { context.date.timeIntervalSince($0) } ?? 0
+                    HStack(alignment: .lastTextBaseline, spacing: 0) {
+                        Text(formatTimeMajor(elapsed))
+                            .font(.system(size: 48, weight: .bold, design: .monospaced))
+                        Text(formatTimeMinor(elapsed))
+                            .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                            .opacity(0.5)
+                    }
+                    .foregroundStyle(camera.isDetecting ? .green : .white)
+                    .contentTransition(.numericText())
                 }
-                .foregroundStyle(camera.isDetecting ? .green : .white)
-                .contentTransition(.numericText())
 
                 if let last = camera.crossings.last {
                     HStack(alignment: .lastTextBaseline, spacing: 0) {

@@ -62,6 +62,8 @@ final class DetectionEngine {
     private let widthFraction:  Float   = 0.08
     private let localSupportFraction: Float = 0.15
     private let minFillRatio: Float = 0.25       // reject sparse blobs (hand swipes)
+    private let maxAspectRatio: Float = 1.8      // reject wide-flat blobs (w/h > 1.8)
+    private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
     // Gate
     private var gateColumn: Int { processWidth / 2 }
@@ -72,6 +74,7 @@ final class DetectionEngine {
     var isFrontCamera = false
     private var sessionStart: CMTime?
     private var lastDetectionElapsed: TimeInterval?
+    private var lastDetectionRealElapsed: TimeInterval?   // actual frame time, for cooldown
     private let cooldown: TimeInterval = 0.5
 
     // Logging
@@ -95,6 +98,7 @@ final class DetectionEngine {
         isActive = true
         sessionStart = timestamp
         lastDetectionElapsed = nil
+        lastDetectionRealElapsed = nil
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
@@ -109,6 +113,7 @@ final class DetectionEngine {
         stop()
         sessionStart = nil
         lastDetectionElapsed = nil
+        lastDetectionRealElapsed = nil
         hasPrevious = false
         frameIndex = 0
     }
@@ -128,12 +133,13 @@ final class DetectionEngine {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
-        let fullW = CVPixelBufferGetWidth(pixelBuffer)
-        let fullH = CVPixelBufferGetHeight(pixelBuffer)
-        let bpr   = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 else { return nil }
+        let fullW = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let fullH = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let bpr   = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return nil }
 
-        // BGRA buffers may arrive landscape despite videoRotationAngle=90
+        // Y plane may arrive landscape despite videoRotationAngle=90
         let isLandscape = fullW > fullH
 
         if frameIndex == 1 {
@@ -159,11 +165,16 @@ final class DetectionEngine {
 
         guard hasPrevious else { return nil }
 
-        // Cooldown
+        // Skip detection during warmup (auto-exposure settling)
+        if frameIndex <= warmupFrames { return nil }
+
+        // Cooldown — compare against real frame time of last detection, not
+        // interpolated crossing time.  Frame drops can create a large real-time gap
+        // that makes the interpolated-time cooldown pass for the same object.
         let now = CMTimeGetSeconds(timestamp)
         let start = CMTimeGetSeconds(sessionStart!)
         let elapsed = now - start
-        if let last = lastDetectionElapsed, (elapsed - last) < cooldown { return nil }
+        if let lastReal = lastDetectionRealElapsed, (elapsed - lastReal) < cooldown { return nil }
 
         let count = W * H
 
@@ -215,6 +226,12 @@ final class DetectionEngine {
                 logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d", fillRatio, minFillRatio, comp.area))
                 continue
             }
+            // Reject wide-flat blobs (hand swipes at close range)
+            // Body crossings are taller than wide; hand swipes are wider than tall
+            if comp.width > Int(maxAspectRatio * Float(comp.height)) {
+                logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
+                continue
+            }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
                 logReject("no_gate_intersection")
                 continue
@@ -236,6 +253,17 @@ final class DetectionEngine {
 
         guard let candidate = best else { return nil }
 
+        // Log all size-qualified components for diagnostics
+        let qualComps = components.filter { $0.height >= minH && $0.width >= minW }
+        if qualComps.count > 1 || true {
+            for (i, comp) in qualComps.enumerated() {
+                let atGate = comp.maxX >= gMin && comp.minX <= gMax
+                let tag = comp.area == candidate.comp.area ? ">>>" : "   "
+                print(String(format: "[COMP] %@ #%d %dx%d x=%d..%d y=%d..%d area=%d gate=%@",
+                             tag, i, comp.width, comp.height, comp.minX, comp.maxX, comp.minY, comp.maxY, comp.area, atGate ? "YES" : "no"))
+            }
+        }
+
         // Body-part suppression (spec 6.4):
         // If a larger size-qualified component exists in the frame that hasn't reached
         // the gate yet but is approaching, suppress this detection and wait for it.
@@ -246,7 +274,6 @@ final class DetectionEngine {
             // This larger component must NOT be at the gate
             guard comp.maxX < gMin || comp.minX > gMax else { continue }
             // Check if it's approaching the gate (leading edge within approach zone)
-            let leadingEdge = comp.maxX < gMin ? comp.maxX : comp.minX
             let distToGate = comp.maxX < gMin ? (gMin - comp.maxX) : (comp.minX - gMax)
             if distToGate <= approachZone {
                 logReject("body_part_suppression",
@@ -288,6 +315,7 @@ final class DetectionEngine {
         }
 
         lastDetectionElapsed = crossingTime
+        lastDetectionRealElapsed = elapsed
         lastRejectReason = ""
 
         let c = candidate.comp
@@ -295,8 +323,8 @@ final class DetectionEngine {
         let wR = Float(c.width) / Float(W)
 
         let fR = Float(c.area) / Float(c.width * c.height)
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f cands=%d area=%d detY=%d frame=%d time=%.3f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, candidateCount, c.area, candidate.detY, frameIndex, crossingTime))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime))
 
         return DetectionResult(
             crossingTime: crossingTime,
@@ -313,7 +341,7 @@ final class DetectionEngine {
         )
     }
 
-    // MARK: - Grayscale Extraction (from BGRA, with transpose support)
+    // MARK: - Grayscale Extraction (Y plane direct read, with transpose support)
 
     private func extractGray(
         base: UnsafeMutableRawPointer, fullW: Int, fullH: Int, bpr: Int,
@@ -323,31 +351,42 @@ final class DetectionEngine {
         let s = scale
 
         if transpose {
-            // Buffer is landscape (fullW > fullH), need to rotate 90 for portrait
+            // Y plane is landscape (fullW > fullH), rotate 90 for portrait
             for ty in 0..<h {
                 let bufX = ty * s
                 for tx in 0..<w {
                     let bufY = tx * s
-                    let px = bufY * bpr + bufX * 4
-                    // BGRA: B=px, G=px+1, R=px+2 — BT.709 luma for HD
-                    let gray = (Int(src[px + 2]) * 54 + Int(src[px + 1]) * 183 + Int(src[px]) * 19) >> 8
-                    dest[ty * w + tx] = UInt8(gray)
+                    dest[ty * w + tx] = src[bufY * bpr + bufX]
                 }
             }
         } else {
-            // Buffer is already portrait
+            // Y plane is already portrait
             for ty in 0..<h {
                 let rowOff = ty * s * bpr
                 for tx in 0..<w {
-                    let px = rowOff + tx * s * 4
-                    let gray = (Int(src[px + 2]) * 54 + Int(src[px + 1]) * 183 + Int(src[px]) * 19) >> 8
-                    dest[ty * w + tx] = UInt8(gray)
+                    dest[ty * w + tx] = src[rowOff + tx * s]
                 }
             }
         }
     }
 
-    // MARK: - Color Thumbnail (from BGRA, callable externally)
+    // MARK: - Color Thumbnail (from YUV 420v biplanar, callable externally)
+
+    /// Pre-warm CGContext + JPEG encoder to eliminate first-call cold start.
+    /// Call once on a background thread when detection starts.
+    static func prewarmThumbnail() {
+        guard let ctx = CGContext(
+            data: nil, width: 1, height: 1,
+            bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return }
+        guard let img = ctx.makeImage() else { return }
+        let d = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(d, "public.jpeg" as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
+        CGImageDestinationFinalize(dest)
+    }
 
     static func colorThumbnail(
         from pixelBuffer: CVPixelBuffer,
@@ -357,12 +396,18 @@ final class DetectionEngine {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
 
-        let fullW = CVPixelBufferGetWidth(pixelBuffer)
-        let fullH = CVPixelBufferGetHeight(pixelBuffer)
-        let bpr   = CVPixelBufferGetBytesPerRow(pixelBuffer)
-        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return nil }
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) >= 2 else { return nil }
 
-        let src = base.assumingMemoryBound(to: UInt8.self)
+        // Plane 0: Y (luma), full resolution
+        let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)!
+            .assumingMemoryBound(to: UInt8.self)
+        let yBpr = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+
+        // Plane 1: CbCr (chroma), half resolution in each dimension
+        let cbcrBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)!
+            .assumingMemoryBound(to: UInt8.self)
+        let cbcrBpr = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
+
         let w = thumbWidth, h = thumbHeight
         let s = scale
 
@@ -376,31 +421,106 @@ final class DetectionEngine {
         guard let data = context.data else { return nil }
         let dst = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
 
-        if transpose {
-            for ty in 0..<h {
-                let bufX = ty * s
-                for tx in 0..<w {
-                    let bufY = tx * s
-                    let sp = bufY * bpr + bufX * 4
-                    let dx = mirrorX ? (w - 1 - tx) : tx
-                    let dp = (ty * w + dx) * 4
-                    dst[dp]     = src[sp + 2] // R
-                    dst[dp + 1] = src[sp + 1] // G
-                    dst[dp + 2] = src[sp]     // B
-                    dst[dp + 3] = 255
+        for ty in 0..<h {
+            for tx in 0..<w {
+                let bufX: Int, bufY: Int
+                if transpose {
+                    bufX = ty * s
+                    bufY = tx * s
+                } else {
+                    bufX = tx * s
+                    bufY = ty * s
                 }
+
+                // Video-range BT.601: Y [16-235], CbCr [16-240]
+                let C = Int(yBase[bufY * yBpr + bufX]) - 16
+                let cbcrOff = (bufY / 2) * cbcrBpr + (bufX / 2) * 2
+                let D = Int(cbcrBase[cbcrOff])     - 128
+                let E = Int(cbcrBase[cbcrOff + 1]) - 128
+
+                // BT.601 video-range YCbCr -> RGB
+                var R = (298 * C + 409 * E + 128) >> 8
+                var G = (298 * C - 100 * D - 208 * E + 128) >> 8
+                var B = (298 * C + 516 * D + 128) >> 8
+
+                R = min(max(R, 0), 255)
+                G = min(max(G, 0), 255)
+                B = min(max(B, 0), 255)
+
+                let dx = mirrorX ? (w - 1 - tx) : tx
+                let dp = (ty * w + dx) * 4
+                dst[dp]     = UInt8(R)
+                dst[dp + 1] = UInt8(G)
+                dst[dp + 2] = UInt8(B)
+                dst[dp + 3] = 255
             }
-        } else {
-            for ty in 0..<h {
-                let rowOff = ty * s * bpr
-                for tx in 0..<w {
-                    let sp = rowOff + tx * s * 4
-                    let dx = mirrorX ? (w - 1 - tx) : tx
-                    let dp = (ty * w + dx) * 4
-                    dst[dp]     = src[sp + 2]
-                    dst[dp + 1] = src[sp + 1]
-                    dst[dp + 2] = src[sp]
-                    dst[dp + 3] = 255
+        }
+
+        guard let cgImage = context.makeImage() else { return nil }
+        let mutableData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            mutableData, "public.jpeg" as CFString, 1, nil
+        ) else { return nil }
+        CGImageDestinationAddImage(dest, cgImage,
+            [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else { return nil }
+        return mutableData as Data
+    }
+
+    /// Generate color thumbnail from pre-copied Y + CbCr plane data (off-queue safe).
+    static func colorThumbnailFromPlanes(
+        yData: Data, yBpr: Int,
+        cbcrData: Data, cbcrBpr: Int,
+        fullW: Int, fullH: Int,
+        transpose: Bool, mirrorX: Bool = false,
+        thumbWidth: Int = 90, thumbHeight: Int = 160, scale: Int = 8
+    ) -> Data? {
+        let w = thumbWidth, h = thumbHeight
+        let s = scale
+
+        guard let context = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: w * 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        guard let data = context.data else { return nil }
+        let dst = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+
+        yData.withUnsafeBytes { yRaw in
+            cbcrData.withUnsafeBytes { cbcrRaw in
+                let yPtr = yRaw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                let cbcrPtr = cbcrRaw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+
+                for ty in 0..<h {
+                    for tx in 0..<w {
+                        let bufX: Int, bufY: Int
+                        if transpose {
+                            bufX = ty * s; bufY = tx * s
+                        } else {
+                            bufX = tx * s; bufY = ty * s
+                        }
+
+                        let C = Int(yPtr[bufY * yBpr + bufX]) - 16
+                        let cbcrOff = (bufY / 2) * cbcrBpr + (bufX / 2) * 2
+                        let D = Int(cbcrPtr[cbcrOff])     - 128
+                        let E = Int(cbcrPtr[cbcrOff + 1]) - 128
+
+                        var R = (298 * C + 409 * E + 128) >> 8
+                        var G = (298 * C - 100 * D - 208 * E + 128) >> 8
+                        var B = (298 * C + 516 * D + 128) >> 8
+                        R = min(max(R, 0), 255)
+                        G = min(max(G, 0), 255)
+                        B = min(max(B, 0), 255)
+
+                        let dx = mirrorX ? (w - 1 - tx) : tx
+                        let dp = (ty * w + dx) * 4
+                        dst[dp]     = UInt8(R)
+                        dst[dp + 1] = UInt8(G)
+                        dst[dp + 2] = UInt8(B)
+                        dst[dp + 3] = 255
+                    }
                 }
             }
         }
@@ -426,7 +546,7 @@ final class DetectionEngine {
         let count = W * H
 
         labels.withUnsafeMutableBufferPointer { lp in
-            for i in 0..<count { lp[i] = 0 }
+            _ = memset(lp.baseAddress!, 0, count * MemoryLayout<Int32>.size)
         }
 
         var nextLabel: Int32 = 1
@@ -528,76 +648,91 @@ final class DetectionEngine {
 
     private let minGateHeightFraction: Float = 0.08 // frame-absolute floor for gate support
 
+    private let sliceWidth = 3 // multi-column window for local support scoring
+
     private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
         let W = processWidth, H = processHeight
         let minSupport = max(3, Int(Float(comp.height) * localSupportFraction),
                              Int(Float(H) * minGateHeightFraction))
 
-        // Determine scan direction: from the leading edge toward the interior.
-        // If component center is left of gate → moving right → leading edge is on the right (maxX) side
-        // Scan gate columns from the side closest to the leading edge inward.
-        let compCenterX = (comp.minX + comp.maxX) / 2
-        let movingRight = compCenterX < gateColumn
+        // Compute best vertical run for each gate column
+        let columns = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
+        guard !columns.isEmpty else { return nil }
 
-        // Order gate columns from leading edge side to trailing edge side
-        let columns: [Int]
-        if movingRight {
-            // Leading edge is on the right → scan gate band from right to left
-            columns = (gMin...gMax).reversed().map { $0 }
-        } else {
-            // Leading edge is on the left → scan gate band from left to right
-            columns = (gMin...gMax).map { $0 }
-        }
+        var colRuns = [Int](repeating: 0, count: columns.count)
+        var colMids = [Int](repeating: 0, count: columns.count)
 
-        var bestRun = 0
-        var bestMid = 0
-
-        for gx in columns {
-            guard gx >= 0, gx < W else { continue }
+        for (ci, gx) in columns.enumerated() {
             var runStart = -1
             var runLen   = 0
-            var colBestRun = 0
-            var colBestMid = 0
+            var best     = 0
+            var bestMid  = 0
 
             for y in comp.minY...comp.maxY {
                 if maskBuf[y * W + gx] != 0 {
                     if runStart < 0 { runStart = y }
                     runLen += 1
                 } else {
-                    if runLen > colBestRun {
-                        colBestRun = runLen
-                        colBestMid = runStart + runLen / 2
-                    }
+                    if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
                     runStart = -1; runLen = 0
                 }
             }
-            if runLen > colBestRun {
-                colBestRun = runLen
-                colBestMid = runStart + runLen / 2
+            if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
+            colRuns[ci] = best
+            colMids[ci] = bestMid
+        }
+
+        // Determine scan direction from leading edge
+        let compCenterX = (comp.minX + comp.maxX) / 2
+        let movingRight = compCenterX < gateColumn
+
+        // Sliding window: require average run across `sliceWidth` adjacent columns.
+        // Using average (not minimum) models a graded score — one weak column
+        // doesn't kill the window, matching Photo Finish's smooth bottle transition.
+        let sw = min(sliceWidth, columns.count)
+        let windowCount = columns.count - sw + 1
+
+        // Build ordered window indices from leading edge
+        let windowIndices: [Int]
+        if movingRight {
+            // Leading edge on right → start from highest column index
+            windowIndices = (0..<windowCount).reversed().map { $0 }
+        } else {
+            windowIndices = (0..<windowCount).map { $0 }
+        }
+
+        var overallBestAvg = 0
+        var overallBestMid = 0
+
+        for wi in windowIndices {
+            // Average run across all columns in this window
+            var sumRun = 0
+            var sumMid = 0
+            for j in wi..<(wi + sw) {
+                sumRun += colRuns[j]
+                sumMid += colMids[j]
+            }
+            let avgRun = sumRun / sw
+
+            if avgRun > overallBestAvg {
+                overallBestAvg = avgRun
+                overallBestMid = sumMid / sw
             }
 
-            // Track overall best run (for reject logging)
-            if colBestRun > bestRun {
-                bestRun = colBestRun
-                bestMid = colBestMid
-            }
-
-            // Accept the FIRST column (from leading edge) that meets local support
-            if colBestRun >= minSupport {
+            if avgRun >= minSupport {
                 return GateAnalysis(
                     hasQualifyingSlice: true,
-                    detectionY: colBestMid,
-                    maxVerticalRun: colBestRun
+                    detectionY: sumMid / sw,
+                    maxVerticalRun: avgRun
                 )
             }
         }
 
-        // No column qualified — return best run for logging
-        guard bestRun > 0 else { return nil }
+        guard overallBestAvg > 0 else { return nil }
         return GateAnalysis(
             hasQualifyingSlice: false,
-            detectionY: bestMid,
-            maxVerticalRun: bestRun
+            detectionY: overallBestMid,
+            maxVerticalRun: overallBestAvg
         )
     }
 
