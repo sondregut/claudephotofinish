@@ -41,6 +41,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     private var frameCount: Int = 0
     private var droppedFrameCount: Int = 0
+    private var previousPlaneCopy: YUVPlaneCopy?
 
     // MARK: Init
 
@@ -149,6 +150,7 @@ final class CameraManager: NSObject, ObservableObject {
         crossings = []
         timerStart = Date()
         frameCount = 0
+        previousPlaneCopy = nil
         engine.isFrontCamera = (cameraPosition == .front)
         engine.start()
         isDetecting = true
@@ -228,22 +230,33 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let expDur = currentInput?.device.exposureDuration
         frameCount += 1
 
+        // Copy current frame's YUV planes before processing result —
+        // we need this both for the thumbnail and to keep as "previous" for next frame.
+        let currentPlaneCopy = Self.copyYUVPlanes(from: pb)
+
         guard let result = engine.processFrame(pb, timestamp: ts, exposureDuration: expDur) else {
+            previousPlaneCopy = currentPlaneCopy
             return
         }
 
         // Beep on detection (dispatch off processing queue to avoid blocking)
         DispatchQueue.main.async { AudioServicesPlaySystemSound(1052) }
 
-        // Copy Y + CbCr plane data so thumbnail can be generated off the processing queue.
-        // This prevents the JPEG encode from blocking the next frame.
+        // Pick the frame closest to the actual gate crossing.
+        // fraction < 0.5 → body was closer to gate in frame N-1 (previous frame)
+        // fraction >= 0.5 → body is closer to gate in frame N (current frame)
         let isFront = engine.isFrontCamera
         let isLandscape = result.isLandscapeBuffer
-        let planeCopy = Self.copyYUVPlanes(from: pb)
+        let usePrevious = result.interpolationFraction < 0.5 && previousPlaneCopy != nil
+        let chosenPlanes = usePrevious ? previousPlaneCopy : currentPlaneCopy
+        let frameLabel = usePrevious ? "prev (N-1)" : "curr (N)"
+        print(String(format: "[THUMBNAIL] using %@ frame (fraction=%.2f)", frameLabel, result.interpolationFraction))
+
+        previousPlaneCopy = currentPlaneCopy
 
         DispatchQueue.global(qos: .utility).async {
             var thumbData: Data? = nil
-            if let planes = planeCopy {
+            if let planes = chosenPlanes {
                 thumbData = DetectionEngine.colorThumbnailFromPlanes(
                     yData: planes.yData, yBpr: planes.yBpr,
                     cbcrData: planes.cbcrData, cbcrBpr: planes.cbcrBpr,
@@ -260,7 +273,12 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                     time: result.crossingTime,
                     thumbnailData: thumbData,
                     gateY: result.gateY,
-                    componentBounds: result.componentBounds
+                    componentBounds: result.componentBounds,
+                    interpolationFraction: result.interpolationFraction,
+                    dBefore: result.dBefore,
+                    dAfter: result.dAfter,
+                    direction: result.movingLeftToRight ? "L>R" : "R>L",
+                    usedPreviousFrame: usePrevious
                 )
                 self.crossings.append(record)
                 print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")

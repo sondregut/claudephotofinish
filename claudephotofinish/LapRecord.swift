@@ -8,4 +8,9 @@ struct LapRecord: Identifiable {
     let thumbnailData: Data?
     let gateY: Int
     let componentBounds: CGRect
+    let interpolationFraction: Double
+    let dBefore: Float
+    let dAfter: Float
+    let direction: String           // "L>R" or "R>L"
+    let usedPreviousFrame: Bool
 }

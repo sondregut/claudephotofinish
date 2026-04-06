@@ -9,6 +9,10 @@ import ImageIO
 struct DetectionResult {
     let crossingTime: TimeInterval
     let frameTimestamp: CMTime
+    let interpolationFraction: Double   // 0..1 — how far between N-1 and N the crossing occurred
+    let dBefore: Float                  // pixels from old leading edge to gate
+    let dAfter: Float                   // pixels from gate to new leading edge
+    let movingLeftToRight: Bool
     let gateY: Int
     let componentBounds: CGRect
     let thumbnailData: Data?
@@ -58,11 +62,11 @@ final class DetectionEngine {
 
     // Thresholds (from spec)
     private let diffThreshold: UInt8    = 25
-    private let heightFraction: Float   = 0.30
+    private let heightFraction: Float   = 0.33
     private let widthFraction:  Float   = 0.08
-    private let localSupportFraction: Float = 0.15
+    private let localSupportFraction: Float = 0.25
     private let minFillRatio: Float = 0.25       // reject sparse blobs (hand swipes)
-    private let maxAspectRatio: Float = 1.8      // reject wide-flat blobs (w/h > 1.8)
+    private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
     // Gate
@@ -226,8 +230,6 @@ final class DetectionEngine {
                 logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d", fillRatio, minFillRatio, comp.area))
                 continue
             }
-            // Reject wide-flat blobs (hand swipes at close range)
-            // Body crossings are taller than wide; hand swipes are wider than tall
             if comp.width > Int(maxAspectRatio * Float(comp.height)) {
                 logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
                 continue
@@ -300,8 +302,24 @@ final class DetectionEngine {
         x = gateColumn + 1
         while x < W && maskBuf[detRow * W + x] != 0 { runRightX = x; x += 1 }
 
-        let dBefore = Float(gateColumn - runLeftX) // distance from body front in N-1 to gate
-        let dAfter  = Float(runRightX - gateColumn) // distance from gate to body front in N
+        // Determine motion direction from component centroid relative to gate.
+        // The bulk of the body is on the approaching side.
+        let compCenterX = (candidate.comp.minX + candidate.comp.maxX) / 2
+        let movingLeftToRight = compCenterX <= gateColumn
+
+        // In the diff strip at detRow, one end is the old leading-edge position (frame N-1)
+        // and the other is the new leading-edge position (frame N).
+        // dBefore = distance from old leading edge to gate (how far it still had to go)
+        // dAfter  = distance from gate to new leading edge (how far past the gate it went)
+        let dBefore: Float
+        let dAfter: Float
+        if movingLeftToRight {
+            dBefore = Float(gateColumn - runLeftX)
+            dAfter  = Float(runRightX - gateColumn)
+        } else {
+            dBefore = Float(runRightX - gateColumn)
+            dAfter  = Float(gateColumn - runLeftX)
+        }
         let stripWidth = dBefore + dAfter
 
         var crossingTime: TimeInterval
@@ -323,12 +341,17 @@ final class DetectionEngine {
         let wR = Float(c.width) / Float(W)
 
         let fR = Float(c.area) / Float(c.width * c.height)
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime))
+        let dir = movingLeftToRight ? "L>R" : "R>L"
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime))
 
         return DetectionResult(
             crossingTime: crossingTime,
             frameTimestamp: timestamp,
+            interpolationFraction: fraction,
+            dBefore: dBefore,
+            dAfter: dAfter,
+            movingLeftToRight: movingLeftToRight,
             gateY: candidate.detY,
             componentBounds: CGRect(
                 x: CGFloat(c.minX) / CGFloat(W),

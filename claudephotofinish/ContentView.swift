@@ -4,7 +4,7 @@ import AVFoundation
 struct ContentView: View {
     @StateObject private var camera = CameraManager()
     @State private var gateFlash = false
-    @State private var fullscreenThumb: Data? = nil
+    @State private var fullscreenLap: LapRecord? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,7 +27,7 @@ struct ContentView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { gateFlash = false }
         }
         .overlay {
-            if let data = fullscreenThumb, let img = UIImage(data: data) {
+            if let lap = fullscreenLap, let data = lap.thumbnailData, let img = UIImage(data: data) {
                 Color.black.ignoresSafeArea()
                     .overlay {
                         Image(uiImage: img)
@@ -38,12 +38,25 @@ struct ContentView: View {
                                     .fill(Color.red.opacity(0.8))
                                     .frame(width: 2)
                             }
+                            .overlay(alignment: .bottom) {
+                                VStack(spacing: 2) {
+                                    Text(String(format: "interp: %.0f / %.0f  (%.2f)",
+                                                lap.dBefore, lap.dAfter, lap.interpolationFraction))
+                                    Text("dir: \(lap.direction)  |  frame: \(lap.usedPreviousFrame ? "prev (N-1)" : "curr (N)")")
+                                }
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundColor(.white)
+                                .padding(8)
+                                .background(Color.black.opacity(0.7))
+                                .cornerRadius(6)
+                                .padding(.bottom, 12)
+                            }
                     }
-                    .onTapGesture { fullscreenThumb = nil }
+                    .onTapGesture { fullscreenLap = nil }
                     .transition(.opacity)
             }
         }
-        .animation(.easeInOut(duration: 0.2), value: fullscreenThumb != nil)
+        .animation(.easeInOut(duration: 0.2), value: fullscreenLap != nil)
     }
 
     // MARK: - Computed
@@ -253,7 +266,7 @@ struct ContentView: View {
                             .frame(width: 1)
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 4))
-                    .onTapGesture { fullscreenThumb = data }
+                    .onTapGesture { fullscreenLap = lap }
             } else {
                 RoundedRectangle(cornerRadius: 4)
                     .fill(Color.gray.opacity(0.2))
