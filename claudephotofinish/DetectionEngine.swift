@@ -73,6 +73,11 @@ final class DetectionEngine {
     private let localSupportFraction: Float = 0.15
     private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
+    // Hand swipe discriminator (2026-04-07): bodies have h/w 1.51–3.57 across
+    // 12 body crossings in Test L; hand swipes have h/w 0.83–2.01 across 45
+    // crossings in Tests L+M. Threshold 1.5 passes all bodies, rejects 84% of
+    // hand swipes. Tunable via Camera Tuning panel.
+    var minHeightWidthRatio: Float = 1.5
     private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
@@ -93,6 +98,11 @@ final class DetectionEngine {
     private var lastRejectReason = ""
     private var frameIndex = 0
 
+    // Buildup tracking: how many consecutive frames had a gate-intersecting,
+    // size-qualified blob before detection fires. Helps discriminate sudden
+    // spikes (hand swipes) from gradual buildup (body crossings).
+    private var gateBuildup = 0
+
     // MARK: Init
 
     init() {
@@ -112,6 +122,7 @@ final class DetectionEngine {
         lastDetectionElapsed = nil
         lastDetectionRealElapsed = nil
         gateOccupied = false
+        gateBuildup = 0
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
@@ -235,6 +246,7 @@ final class DetectionEngine {
         var best: (comp: Component, detY: Int, run: Int, winStart: Int)?
         var candidateCount = 0
         let frameAbsMin = Int(Float(H) * minGateHeightFraction)
+        var anyBlobAtGate = false
 
         for comp in components {
             if comp.height < minH {
@@ -254,12 +266,24 @@ final class DetectionEngine {
                 logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
                 continue
             }
+            // Hand swipe discriminator: reject blobs that aren't tall enough
+            // relative to width. Bodies are always taller than wide; arm
+            // sweeps produce squarish or wide blobs.
+            if Float(comp.height) < minHeightWidthRatio * Float(comp.width) {
+                logReject("hw_ratio",
+                          detail: String(format: "h=%d w=%d ratio=%.2f min=%.2f",
+                                         comp.height, comp.width,
+                                         Float(comp.height) / Float(comp.width),
+                                         minHeightWidthRatio))
+                continue
+            }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
                 logReject("no_gate_intersection")
                 continue
             }
 
             if let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax) {
+                anyBlobAtGate = true
                 if analysis.hasQualifyingSlice {
                     candidateCount += 1
                     if best == nil || comp.area > best!.comp.area {
@@ -271,6 +295,14 @@ final class DetectionEngine {
                               detail: "run=\(analysis.maxVerticalRun) need=\(need)")
                 }
             }
+        }
+
+        // Update buildup counter: increment if any blob reached gate analysis,
+        // reset if no blob was at the gate at all.
+        if anyBlobAtGate {
+            gateBuildup += 1
+        } else {
+            gateBuildup = 0
         }
 
         guard let candidate = best else {
@@ -377,6 +409,8 @@ final class DetectionEngine {
         lastDetectionRealElapsed = elapsed
         gateOccupied = true
         lastRejectReason = ""
+        // Capture buildup before reset — used in DETECT log and DETECT_DIAG
+        let buildupAtDetection = gateBuildup
 
         let c = candidate.comp
         let hR = Float(c.height) / Float(H)
@@ -390,8 +424,8 @@ final class DetectionEngine {
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection))
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
@@ -400,6 +434,9 @@ final class DetectionEngine {
         logGateDiagPrefix("DETECT_DIAG", comp: c, columns: detectCols, need: detectNeed,
                           avg: candidate.run, winStart: candidate.winStart,
                           sliceWidth: min(sliceWidth, detectCols.count))
+
+        // Reset buildup after logging — next crossing starts fresh
+        gateBuildup = 0
 
         return DetectionResult(
             crossingTime: crossingTime,
@@ -1036,8 +1073,10 @@ final class DetectionEngine {
                                    need: Int, avg: Int,
                                    winStart: Int, sliceWidth: Int) {
         var detail = ""
+        var colLongest = [Int]()
         for (ci, gx) in columns.enumerated() {
             let s = columnStats(gx: gx, comp: comp)
+            colLongest.append(s.longest)
             // Mark the 3 columns that fed the winning (or best-so-far) slice
             let inWin = winStart >= 0 && ci >= winStart && ci < winStart + sliceWidth
             let marker = inWin ? ">" : " "
@@ -1075,7 +1114,11 @@ final class DetectionEngine {
                 detail += "/all=" + runStrs.joined(separator: ",")
             }
         }
-        print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
+        // Per-column longest run range (max - min) and minimum.
+        // Hand swipes produce uniform runs (range 1-9), body crossings uneven (range 13-52).
+        let colRange = colLongest.isEmpty ? 0 : (colLongest.max()! - colLongest.min()!)
+        let colMin = colLongest.min() ?? 0
+        print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) colRange=\(colRange) colMin=\(colMin) buildup=\(gateBuildup) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
     }
 
     // MARK: - Logging

@@ -691,6 +691,50 @@ End of section 10.
 
 ## 11. Test G (2026-04-07) follow-up — lean severity correlates one-to-one with picker error, PF does NOT share the bias
 
+> ### ⚠️ Correction added 2026-04-07 — read before §11 sub-sections
+>
+> **Photo Finish does not display a dot.** PF's UI shows only a vertical
+> line (the gate / measurement line). USER_MARK Y values throughout §11
+> are the **Y coordinate of the user's finger tap on our thumbnail near
+> PF's vertical line** — i.e. wherever the finger landed. They are
+> **not** PF's Y choice. PF does not expose a Y coordinate anywhere in
+> its UI.
+>
+> Therefore the following claims inside §11 are **invalid as quantitative
+> claims**: every "USER_MARK Δy", "Δy = our_detY − PF_Y", "PF Y = N",
+> "PF Y values", "PF Y cluster", and any rule fitting that uses
+> "PF anchor Y" as a target. Treat all such numbers as finger-placement
+> noise, not data.
+>
+> **What is still valid in §11:**
+> - The qualitative finding that **PF biases the top of frame** (the
+>   §11.4 "frame-Y top-weighted" working model). Confirmed by physical
+>   tests, not by USER_MARK Y.
+> - The leg-stripe failure mechanism on forward leans (our picker locks
+>   onto the long contiguous leg run while PF anchors to the upper
+>   body). Confirmed via the per-row `/all=` mask data, not via PF Y.
+> - Cross-camera reproducibility (Test G front cam + Test H back cam).
+> - The §11.5 instrumentation expansion (the `/tmY=`, `/top=`, `/2nd=`,
+>   `/all=` fields in DETECT_DIAG).
+>
+> **What this changes for the picker fix:** the picker fix can no
+> longer be designed to "match PF's Y value" because PF does not have
+> an observable Y value. The fix must be designed against observable
+> signals only: our detY, the per-row `/all=` mask data, the user's
+> verbal anatomical reads of where PF's vertical line intersects the
+> body, and the directional success/failure of physical scenarios
+> (forward lean, backward lean, varied frame-position runs, etc.).
+>
+> **Forward-pointer:** see corrected §12 for the rebased framing,
+> the new §12.5 finding that *PF's rule is temporal* ("PF waits for
+> the upper part of the moving blob to cross the gate column before
+> firing"), and the §12.7 vertical-stick test that will discriminate
+> the remaining open question (relative-to-blob vs relative-to-frame).
+>
+> **Memory reference:** the PF-no-dot fact is also saved as the
+> feedback memory `feedback_pf_no_dot_only_x_line.md` so it persists
+> across sessions.
+
 ### 11.0 What this section supersedes
 
 **§10.2 is superseded by §11 for the Y-row picker question.** §10.2
@@ -986,3 +1030,381 @@ that out as unnecessary for the Y-placement question.
 gradient shape has been fit against it on ≥8 more-lean crossings.
 
 End of section 11.
+
+---
+
+## 12. Test H (2026-04-07) follow-up — corrected: Y bias confirmed, finger-tap-Y removed, NEW finding: PF's rule is temporal (waits for upper-blob mask to cross gate)
+
+### 12.0 What this section adds + ⚠️ critical PF-no-dot correction up front
+
+> **READ THIS BEFORE THE REST OF §12.** Earlier in this same session,
+> Claude wrote a long version of §12 that built an entire analytical
+> structure ("PF Y cluster mean 167 SD ≈6", "Δy = our_detY − PF_Y",
+> "Test G #7 outlier at PF Y = 219", offline picker rule fitting against
+> PF_Y targets) on a **false premise**: that USER_MARK Y values carry
+> information about PF's Y choice. They do not.
+>
+> **Photo Finish does not display a dot.** PF's UI shows only a vertical
+> line. The user's tap on our thumbnail "where PF marked" carries only
+> X-axis information (where the line is). The Y of the tap is wherever
+> the finger landed near the line — pure noise. PF does not expose a
+> Y coordinate anywhere in its UI.
+>
+> Every "PF Y", "Δy", "PF Y cluster", and "PF anchor Y" claim from the
+> prior §12 (and from the Test H section of `test_runs_our_detector.md`)
+> is being walked back in this corrected §12. The same correction
+> applies to §11 (banner added). The PF-no-dot fact is also saved as
+> the feedback memory `feedback_pf_no_dot_only_x_line.md` for future
+> sessions.
+>
+> The qualitative findings from the prior §12 (cross-camera replication
+> of the forward-lean failure, the backward-lean discriminator
+> confirming top-of-frame bias) **are still valid** and are restated
+> below using observable signals only. The quantitative scaffolding is
+> dropped.
+
+§11 was based on a single front-cam run (Test G). The corrected §12
+adds three things §11 didn't have:
+
+1. **Cross-camera replication of the forward-lean failure** (back cam,
+   Test H, n=5). Until Test H we did not have evidence the failure
+   reproduced on the other camera.
+2. **Backward-lean discriminator data** (Test H laps 5 and 6). Until
+   Test H we had no crossings where the leading edge of motion through
+   the gate was the lower body. The §11.4 working model makes a clean
+   directional prediction for these cases — Test H is the first run
+   that tested it.
+3. **A NEW empirical finding from this session**, after the doc cleanup
+   was triggered: **PF's rule is temporal, not just spatial.** PF
+   waits for the upper part of the moving blob to cross the gate column
+   before firing. This refines §11.4 from a vague "top-weighted
+   gradient" into a specific testable mechanism. See §12.5 for the
+   verbatim quote and the discussion.
+
+Underlying premise of this entire section, per the user's 2026-04-07
+verbal note: **PF behaves the same on front and back cam.** The rule
+is a single rule. Differences between Test G (front cam) and Test H
+(back cam) are differences in absolute pixel Y values driven by
+camera FOV / framing, **not** PF using a different rule per camera.
+
+### 12.1 Cross-camera replication of the forward-lean failure (qualitative, no PF Y)
+
+**Failure signal — observable only:** on every forward-lean crossing
+across both cameras, **our detY lands deep in the legs** (mid-200s
+range, in the lower portion of the blob). The upper-body mask runs
+visible in `/all=` for the same crossings live at frame y ≈ 120–180
+(in the upper portion of the blob). Our picker is missing the upper
+body by roughly 80–120 px on every lean crossing.
+
+| run | cam | n forward-lean crossings | our detY range | upper-body mask Y range (from /all=) |
+|---|---|---|---|---|
+| Test G "more lean" cluster | front | 5 | ≈ 220–280 | ≈ 130–190 |
+| Test H forward-lean cluster | back | 5 | ≈ 220–282 | ≈ 120–180 |
+
+Cluster shape (range, sign, mechanism) matches across the two cameras
+within noise. This is the first cross-camera reproduction of the
+failure mode and **promotes the forward-lean picker bias from
+"confirmed on one camera" to "confirmed across cameras"**. Combined
+with the user's parity assertion this means: the failure is a
+property of the picker rule, not a property of any camera-pipeline
+detail (FOV, white balance, AE, mirroring, gain). Anything camera-
+specific is ruled out as a primary cause.
+
+Cited Test H crossings: laps 1, 3, 4, 7, 8 (the forward-lean
+cluster). Cited Test G crossings: the "more lean" cluster from §11.
+
+**No quantitative PF Y comparison is made here**, intentionally —
+PF Y is not observable. The failure is established by our detY
+being in the wrong region of the blob's mask, full stop.
+
+### 12.2 Backward-lean discriminator confirms top-of-frame bias
+
+**Test H lap 5** is the strongest single data point in §12. The
+runner crossed with a backward lean ("stomach first"), so the
+**lower body (legs/pelvis) led through the gate column in time**
+while the upper body trailed. Our detY = 269 (deep in the lower
+body, where our picker locked onto the long contiguous leg run).
+The user verbally noted that **PF placed its vertical line on the
+stomach** — i.e. PF anchored to the upper portion of the body even
+though the upper body was the *temporal trailing edge*, not the
+leading edge.
+
+This is a categorical anatomical observation (a body-part read of
+where PF's line intersects the body), not a pixel-Y measurement —
+which makes it usable evidence under the PF-no-dot constraint.
+
+**Test H lap 6** is a second backward-lean crossing where our
+detY = 163 happened to land in the upper-body mask region by
+coincidence. DETECT_DIAG analysis: c88 longest run was 81@112..192
+(upper body), c89 longest was 62@74..135 (very top of frame), c90
+longest was 92@186..277 (legs). The 3-column sliding average
+happened to win on the c88-c89-c90 window where two of three
+columns had their longest run in the upper portion. **A small
+change in body geometry would flip c89 to also pick the leg
+stripe**, and our picker would have dropped to the legs as in
+Test H laps 1, 3, 4, 7, 8. Lap 6 is a lucky accident, not a fix.
+
+**Read together, laps 5 and 6 confirm:** PF anchors to the upper
+portion of the moving blob regardless of which body part is the
+temporal leading edge. This is exactly what §11.4's "top of frame
+bias" predicted for backward leans, and Test H is the first run
+that tested it directly. **The §11.4 working model is now confirmed
+across two independent geometries** — forward leans (Test G + Test H)
+and backward leans (Test H lap 5 + lap 6).
+
+### 12.3 Y bias is real and important — over-correction acknowledged and walked back
+
+After discovering the PF-no-dot mistake mid-session, Claude initially
+**over-corrected** by saying "Y reasoning is invalid". The user
+immediately re-corrected:
+
+> "no cause the Y value is still important since its stil important
+> to know biasesing in terms of y value. since we know if we lean
+> wiht the uppoer body it detects the body but if we lean iwith
+> lower body it waits for upper body, so y value iss still importan
+> tto note"
+
+**Y bias is real, observable, and important.** What is *not*
+observable is the precise pixel Y where PF "decided". The two are
+different things. The right framing:
+
+- **Observable Y signals (use these):** physical lean experiments,
+  verbal/anatomical reads of where PF's vertical line intersects
+  the body, our own detY values, the per-row `/all=` mask data,
+  directional success/failure of physical scenarios.
+- **Not observable (don't use these):** USER_MARK Y values as a
+  proxy for PF's Y choice, "PF Y cluster" statistics, "Δy" against
+  a numerical PF Y target, any rule fitting that uses PF Y as a
+  fitting target.
+
+Y bias **direction** is rock-solid (top of frame). Y bias **strength
+and shape** are still being investigated — see §12.5.
+
+### 12.4 The hard-cap proposal was rejected — recorded for future-Claude
+
+Documenting the rejected proposal so it does not get re-proposed in
+a later session. After §12.3 was understood, Claude proposed a
+one-line picker fix:
+
+```swift
+let cappedY = min(longestRunMid, comp.minY + Int(0.35 * Float(comp.height)))
+```
+
+i.e. take the longest-run midpoint as today, but **cap it at ≤ 35%
+from the top of the blob**. The idea was to force the picker out of
+the legs into the upper-body band on lean crossings.
+
+The user rejected this immediately:
+
+> "this si cmletley wrong and photo finsih tests confimes this, the
+> only thing photo finshi does is bias the top not completely only
+> look at the top"
+
+**Why the hard cap is wrong:** PF **biases** the top — it does not
+**only look** at the top. A hard cap at 35% would force every pick
+into the top fraction of the blob regardless of mask content,
+ignoring the lower body entirely. PF does not do this. PF weights
+the upper body more, but a long-enough or strong-enough lower-body
+mass can still influence PF's behavior. The fix needs a **soft
+top-weighted gradient**, not a threshold. This is exactly what
+§11.4 has said all along; the hard cap was a corruption of §11.4,
+not an implementation of it.
+
+**Future-Claude:** if you find yourself about to propose
+`min(longestRunMid, comp.minY + K*comp.height)` or any equivalent
+hard cap, stop. Re-read this section and §12.5. Propose a soft-
+weighted score per mask run instead.
+
+### 12.5 ⭐ NEW KEY FINDING: PF's rule is temporal, not just spatial
+
+This is the most important new content in §12 and the highest-leverage
+refinement of §11.4 we have so far. The user articulated it directly:
+
+> "actually yout mihgt be right about detection, it seems like it
+> never fires on leading edge near the bittin if the frame but it
+> loos at the whole blob and if the while blob is big enoghu it
+> waits until oart of my hand that is more in the middle of the
+> frame vs the leading part of my hand being near the bottom of
+> frame . and it waits to fire until top of my hand (the part thats
+> higher up) has crossed to fire"
+
+And confirmed again on follow-up:
+
+> "if i have a big enoguh blib that norally detects and i pass the
+> leading edge being at the bottom of the frame, it never fires on
+> this leading edge but waits for more of the upper part of the
+> blobn to cross to fire"
+
+**The refined working model (§12.5):** PF does not just bias the top
+of frame on a single firing frame. **PF's firing decision itself is
+temporal — PF waits for the upper portion of the moving mass to
+reach the gate column before firing.** If the leading edge of motion
+is in the lower portion of the frame, PF does **not** fire on it.
+PF holds off, frame after frame, until enough of the upper portion
+has crossed. The line ends up at the X where the upper portion
+crossed, at the time the upper portion crossed.
+
+**This single rule explains all four scenarios cleanly:**
+
+1. **Forward lean:** the upper body leads through the gate in time.
+   The upper portion reaches the gate column first → PF fires
+   immediately on the upper body. Same fire moment as a leading-edge
+   detector would give, which is why our picker also fires at
+   roughly the right moment on forward leans (we just pick the wrong
+   Y on that frame because we lock onto the leg run).
+2. **Backward lean:** the lower body leads through the gate in time.
+   The upper portion is still trailing. **PF does not fire when only
+   the lower body is at the gate column.** PF waits. Eventually the
+   upper portion reaches the gate → PF fires later, with the line
+   on the upper body. This is the cleanest discriminator: the
+   *firing moment* itself is shifted on backward leans, not just the
+   Y. Test H lap 5's verbal "PF picked stomach" observation is
+   exactly this rule firing.
+3. **Upright no-lean:** upper and lower body reach the gate column
+   at roughly the same time → PF fires "normally" on the upper body
+   (which is essentially synchronous with everything else).
+4. **Far / clipped runner (e.g. Test H lap 7):** the visible blob
+   may only contain part of the body, but PF still tracks the upper
+   portion of *the visible blob* and waits for it to reach the gate.
+   PF detected lap 7 (small clipped blob, comp.minY = 150) — so
+   PF's rule is not gated on an absolute "frame Y must be < N"
+   threshold. PF works at any visible body size. (See §12.7 for the
+   test that pins this down further.)
+
+**Why our picker fails** under this model:
+
+- **On forward leans:** we get the right *moment* (because the
+  leading edge happens to coincide with the upper body) but the
+  wrong *Y on that frame* (we pick the legs, which are the longest
+  contiguous run, instead of the upper body). One-axis failure.
+- **On backward leans:** we get **both** wrong. We fire too early
+  (on the lower-body leading edge, before PF would fire) AND we
+  pick the wrong Y (the legs again). Two-axis failure stacked.
+  This second failure mode (firing too early on backward leans)
+  should be visible as a **time delta between our crossing and
+  PF's** if both are captured on the same physical event. We
+  haven't measured that delta yet — flagging as a future check.
+- **On uprights:** we usually agree because the upper-body leading
+  edge dominates the longest run anyway.
+
+**One residual ambiguity that §12.5 cannot resolve from existing
+data alone:** the user's wording ("upper part of the blob") suggests
+the reference is **relative to the blob**, but Claude has not
+verified this, and the user has explicitly flagged that we are
+**still not sure if PF uses relative-to-blob or relative-to-frame
+height**. Both readings are still on the table:
+
+- **(A) Relative-to-blob:** PF tracks the topmost portion of the
+  current moving blob's mask (some top-N% region or top-weighted
+  score), and waits for that portion's X to reach the gate column.
+  Self-calibrating across camera mount heights and runner
+  distances. The simplest rule.
+- **(B) Relative-to-frame Y:** PF has a Y reference tied to the
+  absolute frame (perhaps the gate line position, perhaps a fixed
+  fraction of frame height, perhaps something else), and waits for
+  the moving mask above that Y reference to reach the gate column.
+  More complex, but possible.
+- **(C) Hybrid:** PF tracks the upper portion of the blob with an
+  absolute floor (e.g. "wait for the topmost mask pixel of the
+  blob to reach the gate column, AND that pixel must be above
+  frame Y = N"). Combines (A) and (B).
+
+**§12.7 (vertical-stick test) is designed to discriminate (A) from
+(B) and (C).** Until that test runs, §12.5's working model is "PF
+waits for the upper part of the moving blob to cross the gate
+column before firing", with the (A)/(B)/(C) ambiguity preserved.
+
+**Sub-sub-ambiguity** (resolvable by a follow-up object test, not
+this round): whether "upper part" means the absolute topmost mask
+pixel, the top N% by row count, or a soft top-weighted score over
+all rows.
+
+### 12.6 What changes this session
+
+**Doc-only.** No `analyzeGate` change. No parameter change. No
+instrumentation change. Specifically:
+
+- `DetectionEngine.swift` is unchanged.
+- `ColStats` / `columnStats` / `logGateDiagPrefix` (the §11.5
+  expansion) is unchanged — Test H confirmed the `/all=` field is
+  exactly what we needed and no further instrumentation round is
+  required.
+- `detection_spec.md`, `detection_inferences.md`, and
+  `pipeline_audit.md` do not move yet. §12.5 sharpens §11.4 from
+  "top-weighted gradient" to a specific temporal mechanism, but
+  the underlying §11.4 model was already committed at the
+  qualitative level. The exact "how much of the upper portion needs
+  to cross before firing" parameter — and whether the reference is
+  relative-to-blob or relative-to-frame — is still open. The spec
+  moves only when both questions are answered.
+
+The picker fix is **deferred** until §12.7 returns and the
+relative-vs-absolute question is settled. See §12.5 for why a
+hard-cap fix would be wrong even with all the current data.
+
+### 12.7 Next physical test request — vertical stick object test
+
+**Goal:** discriminate "PF tracks the upper portion of the blob,
+self-calibrating to the blob" (relative, hypothesis A in §12.5) from
+"PF has an absolute Y reference somewhere in the frame coordinate
+system" (B or hybrid C in §12.5).
+
+The user requested an **object-based test** rather than body
+crossings — easier to control, more reproducible, doesn't require
+running.
+
+**Equipment:** any straight rod ≥ 50 cm — broomstick, mop handle,
+hockey stick, golf club, yardstick. Held vertically.
+
+**Setup:** open Photo Finish on the iPhone, mounted the same way
+the user mounts it for normal lap tests. We're testing PF's
+behavior directly — no logs from our app needed for this round.
+Cross-checking against our app can come later if PF's result is
+ambiguous.
+
+**The three test variations (same motion, different vertical
+position):**
+
+In all three variations, the user holds the stick **vertically**
+and **walks it horizontally** through the gate column at a normal
+pace. The only thing that changes is **how high the stick is held
+in the frame**. Use PF's live view / thumbnail to eyeball the
+stick's vertical position — exact pixel values not required.
+
+| Test | How to hold | What it tests |
+|---|---|---|
+| **T1** | Stick top near the **top of the camera frame** (head/chest height) | Baseline — PF should fire normally |
+| **T2** | Stick top in the **lower half of the camera frame** (waist/knee height) | The discriminator — relative model predicts fire, absolute model predicts skip |
+| **T3** | Stick top in the **bottom third of the camera frame** (knee/shin height) | Stretches the discriminator further |
+
+Repeat each test 2–3 times to filter flukes.
+
+**What to record per test:**
+- PF fired Y/N
+- If yes, where the line landed on the stick (top end / middle /
+  bottom end) — categorical, not pixel-Y
+
+**What the results mean:**
+
+| Result | Interpretation | Picker fix path |
+|---|---|---|
+| T1=Y, T2=Y, T3=Y | **Hypothesis A confirmed (relative-to-blob).** PF tracks the upper portion of the blob, no absolute floor. | Ship picker fix that implements the §12.5 temporal wait rule, relative-to-blob version |
+| T1=Y, T2=Y, T3=N | **Hypothesis C confirmed (relative + absolute floor).** Floor lies between knee and shin height. Need a 4th test to find the exact threshold | Picker fix is more complex; needs the floor parameter |
+| T1=Y, T2=N, T3=N | **Hypothesis B (strong absolute Y component).** Floor lies above knee height — relative-only model is wrong | Picker fix needs to be designed differently; further investigation required |
+| T1=N | The stick is below PF's minimum-height filter | Use a longer stick |
+
+**Confound to watch:** if T1 fails, do not interpret as "PF is
+broken" — interpret as "stick is too small for PF's size filter".
+We have a `heightFraction = 0.33` filter; PF likely has something
+similar.
+
+**No code changes** before this test runs and the result has been
+analyzed. The current picker is unchanged.
+
+**No backward-lean / forward-lean / body crossings in this test** —
+those are saturated on the §12.5 finding. The vertical-stick test
+isolates the relative-vs-absolute question that §12.5 cannot answer
+from existing data.
+
+End of section 12.
+

@@ -1925,3 +1925,572 @@ trigger because the 3-column sliding window averages out thin
 appendages.
 
 ---
+
+## Run 2026-04-07 Test J — head-detection regression (localSupportFraction=0.15, minFillRatio=0.20)
+
+**Device / setup:** iPhone, front camera, handheld. Gate column = center
+(x=90 in process coords).
+
+**Build:** commit `8003aca` — `localSupportFraction` 0.15,
+`minFillRatio` 0.20, `frameBiasCap` 0.55. Also includes
+`gateOccupied` guard against double-triggers.
+
+**Two sessions recorded.** First session (5 crossings) was a quick
+warmup/test — excluded. Second session (15 crossings) is the main
+data. Crossings #14 and #15 appear to be artifacts (#14 blob=180×320
+fill=0.86 = entire frame; #15 fired immediately after at detY=201).
+
+### Detection table (second session, crossings #1–#13)
+
+| # | frame | blob | fill | run | need | detY | rawDetY | cap? | dir | head? |
+|---|-------|------|------|-----|------|------|---------|------|-----|-------|
+| 1 | 216 | 180×167 | 0.32 | 25 | 25 | 176 | 239 | yes | L>R | |
+| 2 | 360 | 164×209 | 0.28 | 36 | 31 | 176 | 229 | yes | R>L | |
+| 3 | 527 | 79×125 | 0.54 | 81 | 25 | 176 | 182 | yes | R>L | |
+| 4 | 617 | 100×170 | 0.30 | 27 | 25 | 125 | 125 | no | L>R | **YES** |
+| 5 | 713 | 175×198 | 0.36 | 39 | 29 | 176 | 238 | yes | R>L | |
+| 6 | 804 | 110×245 | 0.40 | 46 | 36 | 103 | 103 | no | L>R | **YES** |
+| 7 | 900 | 147×231 | 0.27 | 34 | 34 | 115 | 115 | no | R>L | **YES** |
+| 8 | 1022 | 161×217 | 0.25 | 36 | 32 | 163 | 163 | no | L>R | |
+| 9 | 1177 | 114×195 | 0.33 | 34 | 29 | 176 | 238 | yes | R>L | |
+| 10 | 1286 | 142×306 | 0.34 | 46 | 45 | 176 | 296 | yes | L>R | |
+| 11 | 1369 | 109×154 | 0.29 | 28 | 25 | 84 | 84 | no | R>L | **YES** |
+| 12 | 1448 | 172×234 | 0.27 | 67 | 35 | 176 | 279 | yes | R>L | |
+| 13 | 1563 | 127×229 | 0.42 | 36 | 34 | 176 | 183 | yes | L>R | |
+
+### USER_MARK table (marked crossings only)
+
+| # | detY | userY | Δy | userX | head? |
+|---|------|-------|----|-------|-------|
+| 2 | 176 | 165 | -11 | 83 | |
+| 4 | 125 | 175 | +50 | 36 | **YES** |
+| 6 | 103 | 152 | +49 | 56 | **YES** |
+| 7 | 115 | 151 | +36 | 121 | **YES** |
+| 9 | 176 | 136 | -40 | 112 | |
+| 11 | 84 | 137 | +53 | 97 | **YES** |
+| 12 | 176 | 148 | -28 | 125 | |
+| 13 | 176 | 158 | -18 | 15 | |
+
+Note: USER_MARK Y is finger-tap noise (PF shows only a vertical
+line), but the SIGN of Δy is strongly diagnostic here. Head
+detections show large positive Δy (+36 to +53) — our dot is far
+above the user's tap. Non-head crossings show negative Δy (-11 to
+-40) — our dot is below the user's tap.
+
+### Rejection patterns before head-detection crossings
+
+| # | local_support rejects before | pattern |
+|---|---|---|
+| 4 | 0 — fired on first qualifying frame | blob 100×170, need=25, run=27. Barely over threshold. |
+| 6 | 1 frame (run=1 need=36 at frame 803) | Fired next frame with run=46. |
+| 7 | 3 frames (895: run=24/need=25, 896: run=25/need=28, 899: run=20/need=34) | Fired at frame 900 with run=34 = need exactly. |
+| 11 | 3 frames (1366: run=4, 1367: run=5, 1368: run=15 vs need=34) | Fired at frame 1369 with run=28, need=25 (smaller blob). |
+
+### Observations
+
+1. **Head-detection regression:** 4 out of 13 crossings (#4, #6, #7,
+   #11) fired on the head — detY = 84-125, well above the
+   torso zone (≈150-175). All four are user-confirmed (large
+   positive Δy). This did NOT happen in Test I (0.20/0.22
+   thresholds).
+
+2. **Root cause — localSupportFraction too low (0.15):** The head
+   alone creates a 25-35px vertical run at the gate, which now
+   passes the `need` threshold (25-34 for these blobs). At 0.20,
+   need would have been 34-49 for the same blobs, which the head
+   alone wouldn't reach.
+
+3. **Cap crossings still show same pattern as Test I:** Where the cap
+   fires (crossings #2, #5, #9, #10, #12, #13), Δy is negative
+   (-11 to -40), consistent with our dot being below PF's line.
+
+4. **Threshold tradeoff is clear:**
+   - At 0.25/0.25 (original): fires too late, legs detected
+   - At 0.20/0.22 (Test I): fires slightly late, some near-misses
+   - At 0.15/0.20 (Test J): fires early enough but now catches head
+   - Sweet spot is somewhere between 0.15 and 0.20 for
+     localSupportFraction, or a different approach entirely.
+
+5. **`gateOccupied` guard working:** Frame 16 shows
+   `[REJECT] gate_occupied` — no double-triggers observed.
+
+6. **Artifacts:** Crossings #14 (blob=180×320, entire frame) and
+   #15 (detY=201, comp.minY safety floor override) appear to be
+   frame-drop artifacts, excluded from analysis.
+
+### Action
+
+More testing needed to determine the right balance. Options to
+explore:
+- Split the difference: localSupportFraction=0.18
+- Add a minimum absolute gate run (e.g. ≥30px) so the head alone
+  (25px) can't qualify regardless of blob-relative threshold
+- Increase `minGateHeightFraction` (currently 0.08 = 25px) to
+  ~0.10 (32px) to set a higher frame-absolute floor
+- Blob-height-relative approach with a floor: max(30, comp.height
+  × 0.15)
+
+No code changes in this session — need to decide approach first.
+
+---
+
+## Run 2026-04-07 Test K — hand swipe rejection test (localSupportFraction=0.15, minFillRatio=0.20)
+
+**Device / setup:** iPhone, front camera, handheld. Gate column = center.
+User standing behind the gate line, swiping hands in circular motion.
+**Photo Finish correctly rejects all of these.** Our detector should too.
+
+**Build:** same as Test J — commit `8003aca`, `localSupportFraction`
+0.15, `minFillRatio` 0.20, `frameBiasCap` 0.55.
+
+### Detection table (all false positives — hand swipes)
+
+| # | frame | blob | fill | run | need | what set need | detY | rawDetY |
+|---|-------|------|------|-----|------|---------------|------|---------|
+| 1 | 22 | 121×209 | 0.29 | 39 | 31 | blob-rel (209×0.15) | 176 | 295 |
+| 2 | 81 | 116×110 | 0.46 | 26 | 25 | frame floor (320×0.08) | 176 | 191 |
+| 3 | 139 | 104×135 | 0.24 | 25 | 25 | frame floor (320×0.08) | 176 | 201 |
+| 4 | 311 | 124×158 | 0.26 | 25 | 25 | frame floor (320×0.08) | 176 | 202 |
+
+### Which filter WOULD have caught each at original thresholds (0.25/0.25)?
+
+| # | fill vs 0.25 | need@0.25 | caught by |
+|---|---|---|---|
+| 1 | 0.29 pass | 52 (run=39 fails) | **local_support** |
+| 2 | 0.46 pass | 27 (run=26 fails) | **local_support** |
+| 3 | 0.24 fail | — | **fill_ratio** |
+| 4 | 0.26 pass | 39 (run=25 fails) | **local_support** |
+
+### Near-miss analysis
+
+Extensive GATE_DIAG near-misses throughout the run show hand swipe
+gate runs consistently in the **15-24px** range, with occasional
+spikes to 25-39px. The frame-absolute floor of 25px
+(`minGateHeightFraction=0.08`) rejected most frames — crossings
+#2-#4 fired when the run just barely reached 25-26px.
+
+Crossing #1 is the outlier: a circular arm sweep created a 121×209
+blob with a 39px gate run. This is unusually large for a hand swipe
+and required the blob-relative threshold (need=52 at 0.25) to
+reject.
+
+### Key data points for threshold tuning
+
+Hand swipe gate run distribution (from GATE_DIAG near-misses):
+- Most frames: run=15-24 (rejected by current floor=25)
+- Occasional: run=25-26 (barely passed floor=25)
+- Rare outlier: run=39 (large circular arm motion)
+
+For comparison, body crossing gate runs from Test I and J:
+- Torso leading edge: run=34-65 (early frames, before full body)
+- Full body at gate: run=67-146
+
+**The overlap zone is 25-39px** — hand swipes occasionally reach
+this range, and early body crossings start in this range. This is
+the discrimination challenge.
+
+### Observations
+
+1. **localSupportFraction=0.15 is too permissive.** It lets the
+   blob-relative need drop below the hand swipe run range.
+2. **The frame-absolute floor (25px) is doing most of the work.**
+   3 of 4 false positives fired because run barely reached 25.
+3. **fill_ratio=0.20 is not the main issue.** Only crossing #3
+   (fill=0.24) would have been caught by fill_ratio=0.25. The
+   other three pass fill_ratio at any reasonable threshold.
+4. **The fix space involves two levers:**
+   - Raise `minGateHeightFraction` (frame-absolute floor) from
+     0.08 (25px) to 0.10+ (32px+) — kills runs of 25-31
+   - Raise `localSupportFraction` back toward 0.18-0.20 — kills
+     the rare large-blob outlier (run=39, blob 209px)
+5. **Need more test data to calibrate:** specifically, body
+   crossings at this threshold to see if a 32px floor or 0.18
+   fraction delays torso detection.
+
+### Next test needed
+
+Run with **mixed body crossings and hand swipes in the same session**
+at the current thresholds (0.15/0.20). This gives us both signal
+types in one log, making it easier to see where the discrimination
+boundary should be. Ideally:
+- 5+ body crossings (mix of upright and lean)
+- 5+ hand swipes (circular arm motion, single arm reach, etc.)
+- Mark which crossings are which type afterward
+
+---
+
+## Run 2026-04-07 Test L — mixed hand swipes + lean body crossings, front camera
+
+**Device / setup:** iPhone, **front camera**, handheld. Two-phase
+session: hand swipes first (#1–#16), then body crossings with lean
+(#17–#28). User confirmed the split: "the first runs were hand swipes
+and all of the next were full body."
+
+**Build:** commit `8003aca` — localSupportFraction=0.15, minFillRatio=0.20,
+minGateHeightFraction=0.08 (floor=25px), frameBiasCap=0.55.
+
+### Detector parameters (same as Test K)
+
+Same build and parameter state as Test K above.
+
+### Phase 1 — Hand swipes (#1–#16): 16 false positive detections
+
+| # | blob | hR | wR | fill | run | need | dir | detY | rawDetY | frame | time |
+|---|------|------|------|------|-----|------|-----|------|---------|-------|------|
+| 1\* | 97×308 | 0.96 | 0.54 | 0.30 | 47 | 46 | R>L | 176 | 292 | 181 | 5.992 |
+| 2 | 136×132 | 0.41 | 0.76 | 0.28 | 25 | 25 | L>R | 176 | 217 | 321 | 11.118 |
+| 3 | 129×145 | 0.45 | 0.72 | 0.27 | 29 | 25 | L>R | 176 | 228 | 361 | 12.453 |
+| 4 | 132×143 | 0.45 | 0.73 | 0.25 | 26 | 25 | L>R | 176 | 232 | 378 | 13.024 |
+| 5 | 143×139 | 0.43 | 0.79 | 0.26 | 33 | 25 | L>R | 176 | 224 | 418 | 14.352 |
+| 6 | 118×191 | 0.60 | 0.66 | 0.33 | 31 | 28 | L>R | 176 | 243 | 440 | 15.094 |
+| 7 | 152×145 | 0.45 | 0.84 | 0.26 | 25 | 25 | L>R | 176 | 216 | 458 | 15.681 |
+| 8 | 112×150 | 0.47 | 0.62 | 0.37 | 29 | 25 | L>R | 176 | 227 | 482 | 16.491 |
+| 9 | 133×145 | 0.45 | 0.74 | 0.22 | 25 | 25 | L>R | 176 | 226 | 509 | 17.386 |
+| 10 | 107×166 | 0.52 | 0.59 | 0.24 | 30 | 25 | L>R | 176 | 245 | 531 | 18.127 |
+| 11 | 138×142 | 0.44 | 0.77 | 0.25 | 28 | 25 | L>R | 176 | 226 | 553 | 18.855 |
+| 12 | 99×177 | 0.55 | 0.55 | 0.28 | 26 | 26 | L>R | 176 | 250 | 574 | 19.567 |
+| 13 | 116×128 | 0.40 | 0.64 | 0.32 | 33 | 25 | L>R | 176 | 244 | 641 | 21.796 |
+| 14 | 109×150 | 0.47 | 0.61 | 0.28 | 28 | 25 | L>R | 176 | 228 | 662 | 22.496 |
+| 15 | 138×133 | 0.42 | 0.77 | 0.27 | 28 | 25 | L>R | 176 | 220 | 679 | 23.058 |
+| 16 | 124×135 | 0.42 | 0.69 | 0.39 | 27 | 25 | L>R | 176 | 224 | 701 | 23.797 |
+
+\* Crossing #1 is likely walk-to-position (height 308 ≈ full frame,
+hR=0.96), not a deliberate hand swipe. All others (#2–#16) are
+circular arm motion from behind gate.
+
+Hand swipe summary (#2–#16):
+- blob heights: 128–191 (median ≈145)
+- runs: 25–33 (median ≈28)
+- fill: 0.22–0.39 (median ≈0.27)
+- hR: 0.40–0.60
+- ALL dir=L>R, ALL detY=176 (capped)
+- need=25 for 13/15, need=26–28 for 2/15 (frame floor dominates)
+
+### Phase 2 — Body crossings with lean (#17–#28): 12 detections
+
+| # | blob | hR | wR | fill | run | need | dir | detY | rawDetY | frame | time |
+|---|------|------|------|------|-----|------|-----|------|---------|-------|------|
+| 17 | 121×210 | 0.66 | 0.67 | 0.24 | 38 | 31 | L>R | 73 | 73 | 724 | 24.551 |
+| 18 | 88×252 | 0.79 | 0.49 | 0.22 | 41 | 37 | L>R | 146 | 146 | 855 | 28.939 |
+| 19 | 115×226 | 0.71 | 0.64 | 0.24 | 33 | 33 | R>L | 155 | 155 | 931 | 31.472 |
+| 20 | 89×170 | 0.53 | 0.49 | 0.24 | 25 | 25 | L>R | 117 | 117 | 1004 | 33.895 |
+| 21 | 114×239 | 0.75 | 0.63 | 0.35 | 50 | 35 | R>L | 163 | 163 | 1092 | 36.832 |
+| 22 | 49×168 | 0.52 | 0.27 | 0.30 | 65 | 25 | L>R | 176 | 187 | 1174 | 39.566 |
+| 23 | 156×236 | 0.74 | 0.87 | 0.21 | 45 | 35 | R>L | 176 | 264 | 1262 | 42.490 |
+| 24 | 150×228 | 0.71 | 0.83 | 0.24 | 47 | 34 | L>R | 176 | 264 | 1335 | 44.916 |
+| 25 | 136×245 | 0.77 | 0.76 | 0.31 | 48 | 36 | R>L | 176 | 280 | 1406 | 47.301 |
+| 26 | 114×240 | 0.75 | 0.63 | 0.25 | 52 | 36 | L>R | 176 | 266 | 1465 | 49.263 |
+| 27 | 49×175 | 0.55 | 0.27 | 0.34 | 68 | 26 | R>L | 176 | 255 | 1538 | 51.686 |
+| 28 | 180×320 | 1.00 | 1.00 | 0.61 | 288 | 48 | L>R | 162 | 162 | 1623 | 54.865 |
+
+Body crossing summary (#17–#28):
+- blob heights: 168–320 (median ≈233)
+- runs: 25–288 (median ≈47.5)
+- fill: 0.21–0.61 (median ≈0.24)
+- hR: 0.52–1.00 (median ≈0.73)
+- Mix of L>R and R>L (alternating directions)
+- detY varies: 73–176 (several uncapped)
+
+### USER_MARK Δx (PF comparison, body crossings only)
+
+| # | detY | userX | time |
+|---|------|-------|------|
+| 17 | 73 | 37 | 24.551 |
+| 20 | 117 | 79 | 33.895 |
+| 23 | 176 | 106 | 42.490 |
+| 24 | 176 | 73 | 44.916 |
+
+Note: USER_MARK Y values omitted per standing rule.
+
+### Near-miss GATE_DIAG — hand swipe phase (rejected)
+
+Many hand swipe frames were rejected at local_support. Per-column
+longest runs shown (c88 through c92):
+
+| frame | blob | need | avg | c88 | c89 | c90 | c91 | c92 | range |
+|-------|------|------|-----|-----|-----|-----|-----|-----|-------|
+| 258 | 121×156 | 25 | 23 | 23 | 24 | 23 | 24 | 24 | 1 |
+| 278 | 92×113 | 25 | 19 | 16 | 17 | 19 | 21 | 19 | 5 |
+| 279 | 71×124 | 25 | 20 | 14 | 17 | 20 | 21 | 19 | 7 |
+| 281 | 118×159 | 25 | 19 | 19 | 19 | 20 | 19 | 20 | 1 |
+| 282 | 136×161 | 25 | 19 | 19 | 19 | 19 | 19 | 20 | 1 |
+| 296 | 146×146 | 25 | 19 | 20 | 19 | 19 | 18 | 17 | 3 |
+| 297 | 139×132 | 25 | 21 | 20 | 22 | 21 | 22 | 21 | 2 |
+| 298 | 117×146 | 25 | 18 | 18 | 19 | 18 | 18 | 18 | 1 |
+| 320 | 113×151 | 25 | 23 | 19 | 19 | 21 | 24 | 25 | 6 |
+| 336 | 147×143 | 25 | 21 | 21 | 21 | 21 | 21 | 20 | 1 |
+| 360 | 117×212 | 31 | 29 | 28 | 29 | 30 | 29 | 28 | 2 |
+| 400 | 111×157 | 25 | 20 | 22 | 20 | 20 | 21 | 17 | 5 |
+| 401 | 121×176 | 26 | 21 | 22 | 21 | 21 | 21 | 18 | 4 |
+| 416 | 158×150 | 25 | 18 | 18 | 18 | 18 | 18 | 17 | 1 |
+| 417 | 153×136 | 25 | 19 | 19 | 19 | 19 | 18 | 18 | 1 |
+| 457 | 163×154 | 25 | 23 | 23 | 23 | 23 | 22 | 22 | 1 |
+| 595 | 156×143 | 25 | 24 | 37 | 19 | 18 | 18 | 19 | 19 |
+| 606 | 136×131 | 25 | 19 | 19 | 20 | 20 | 19 | 19 | 1 |
+| 613 | 127×143 | 25 | 21 | 20 | 21 | 21 | 21 | 21 | 1 |
+| 616 | 143×137 | 25 | 21 | 22 | 21 | 20 | 20 | 20 | 2 |
+| 626 | 144×145 | 25 | 21 | 20 | 21 | 22 | 21 | 21 | 2 |
+
+Hand swipe GATE_DIAG column range: **1–7** (except frame 595 outlier
+at 19, which had one anomalous c88=37 — likely two arms overlapping).
+
+### Near-miss GATE_DIAG — body crossing phase (rejected)
+
+| frame | blob | need | avg | c88 | c89 | c90 | c91 | c92 | range |
+|-------|------|------|-----|-----|-----|-----|-----|-----|-------|
+| 1090 | 96×240 | 36 | 31 | 23 | 24 | 26 | 30 | 38 | 15 |
+| 1261 | 141×236 | 35 | 29 | 23 | 11 | 24 | 29 | 35 | 24 |
+| 1332 | 103×182 | 27 | 20 | 15 | 17 | 19 | 21 | 21 | 6 |
+| 1401 | 104×203 | 30 | 23 | 16 | 27 | 28 | 14 | 13 | 15 |
+| 1464 | 132×235 | 35 | 33 | 36 | 33 | 30 | 25 | 24 | 12 |
+| 1537 | 108×239 | 35 | 29 | 8 | 8 | 21 | 30 | 36 | 28 |
+
+Body crossing GATE_DIAG column range: **6–28**.
+
+### DETECT_DIAG per-column analysis — the discrimination signal
+
+Per-column longest runs for each DETECTED crossing:
+
+**Hand swipes (#2–#16):**
+
+| # | c88 | c89 | c90 | c91 | c92 | range | runs/col |
+|---|-----|-----|-----|-----|-----|-------|----------|
+| 2 | 22 | 22 | 24 | 25 | 26 | 4 | 2,2,2,2,2 |
+| 3 | 29 | 29 | 30 | 29 | 28 | 2 | 2,2,2,2,2 |
+| 4 | 29 | 28 | 27 | 26 | 26 | 3 | 2,2,2,2,2 |
+| 5 | 31 | 32 | 33 | 34 | 34 | 3 | 2,2,2,2,2 |
+| 6 | 38 | 36 | 34 | 32 | 29 | 9 | 2,2,2,2,2 |
+| 7 | 25 | 25 | 25 | 25 | 26 | 1 | 2,2,2,2,2 |
+| 8 | 28 | 28 | 29 | 30 | 30 | 2 | 2,2,2,2,2 |
+| 9 | 26 | 26 | 25 | 25 | 24 | 2 | 2,2,2,2,2 |
+| 10 | 33 | 32 | 32 | 31 | 28 | 5 | 1,1,1,1,1 |
+| 11 | 28 | 28 | 28 | 28 | 29 | 1 | 2,2,2,2,2 |
+| 12 | 27 | 28 | 28 | 22 | 21 | 7 | 1,1,1,2,1 |
+| 13 | 35 | 34 | 34 | 33 | 34 | 2 | 2,2,2,2,2 |
+| 14 | 29 | 29 | 29 | 27 | 28 | 2 | 1,1,1,1,1 |
+| 15 | 28 | 28 | 28 | 28 | 29 | 1 | 2,2,2,2,2 |
+| 16 | 30 | 29 | 28 | 27 | 27 | 3 | 3,3,3,3,3 |
+
+Hand swipe column range: **1–9** (all ≤ 9).
+
+**Body crossings (#17–#28):**
+
+| # | c88 | c89 | c90 | c91 | c92 | range | runs/col |
+|---|-----|-----|-----|-----|-----|-------|----------|
+| 17 | 43 | 42 | 40 | 38 | 38 | 5 | 4,5,3,4,3 |
+| 18 | 48 | 42 | 51 | 30 | 17 | 34 | 5,5,3,7,11 |
+| 19 | 14 | 19 | 40 | 42 | 41 | 28 | 10,10,7,6,5 |
+| 20 | 15 | 15 | 28 | 26 | 22 | 13 | 5,2,1,2,2 |
+| 21 | 37 | 47 | 66 | 69 | 73 | 36 | 7,11,12,11,7 |
+| 22 | 25 | 38 | 62 | 66 | 67 | 42 | 14,8,11,8,12 |
+| 23 | 42 | 40 | 53 | 53 | 44 | 13 | 6,6,7,5,4 |
+| 24 | 27 | 29 | 51 | 49 | 41 | 24 | 8,8,7,5,8 |
+| 25 | 17 | 23 | 28 | 48 | 69 | 52 | 6,9,7,7,5 |
+| 26 | 48 | 54 | 67 | 47 | 44 | 23 | 15,14,14,16,13 |
+| 27 | 65 | 68 | 72 | 44 | 84 | 40 | 4,5,5,9,6 |
+| 28 | 267 | 268 | 306 | 261 | 297 | 45 | 2,2,1,3,3 |
+
+Body crossing column range: **5–52** (11/12 are ≥ 13; only #17 at 5).
+
+### Key finding: column-run consistency discriminates hand swipes from body
+
+The **range of per-column longest runs** (max − min across the 5
+gate columns) is the strongest discriminator found:
+
+| metric | hand swipes (#2–#16) | body crossings (#17–#28) |
+|--------|---------------------|-------------------------|
+| column range | 1–9 | 5–52 (11/12 ≥ 13) |
+| median range | 2 | 28 |
+| overlap | only #17 at range=5 overlaps |
+
+**Why it works:** hand swipes produce uniform vertical motion across
+all gate columns — the arm sweeps horizontally and covers all columns
+equally. Body crossings produce uneven coverage — one side of the body
+enters the gate first, so outer columns see more motion than inner
+columns. This asymmetry is inherent to body geometry.
+
+A threshold of **column range ≥ 10** would:
+- Correctly reject all 15 hand swipes (ranges 1–9)
+- Correctly pass 11/12 body crossings (ranges 13–52)
+- Misclassify only #17 (range=5) — but #17 has run=38, which is
+  above all hand swipe runs (max 33), so a combined check works
+
+The rejected GATE_DIAG frames confirm this pattern:
+- Hand swipe near-misses: column range 1–7 (consistent)
+- Body crossing near-misses: column range 6–28 (variable)
+
+### Other discrimination features (weaker)
+
+| feature | hand swipes | body crossings | overlap |
+|---------|-------------|----------------|---------|
+| blob height | 128–191 | 168–320 | 168–191 |
+| hR | 0.40–0.60 | 0.52–1.00 | 0.52–0.60 |
+| run | 25–33 | 25–288 | 25–33 |
+| fill | 0.22–0.39 | 0.21–0.61 | heavy overlap |
+| runs/col | mostly 1–2 | 1–16 | overlap at low end |
+
+None of these alone cleanly separates the two groups. Column-range
+consistency is the only feature with near-clean separation.
+
+### Head detection issue on body crossings
+
+Two body crossings fired on the head (detY far above torso):
+
+| # | detY | rawDetY | USER_MARK Δy | note |
+|---|------|---------|--------------|------|
+| 17 | 73 | 73 | +72 | head area, first lean crossing |
+| 20 | 117 | 117 | +42 | upper torso / shoulder area |
+
+This continues the head-detection regression seen in Test J. The
+frameBiasCap (0.55 = Y≤176) only prevents firing too LOW — it
+doesn't prevent firing on the head when the leading edge is at the
+top of the frame.
+
+### Crossing #20 barely passed
+
+Crossing #20: blob=89×170, fill=0.24, run=25, need=25. Passed at
+exact floor (25=25). Raising the floor to 32+ (minGateHeightFraction=
+0.10) would have rejected this real body crossing.
+
+---
+
+## Run 2026-04-07 Test M — varied hand swipes only, front camera
+
+**Device / setup:** iPhone, **front camera**, handheld. Hand swipes
+only — varied types: circular, single-arm reach, both-arms, fast
+flicks, etc. No body crossings in this session. PF rejection status
+not confirmed.
+
+**Build:** commit `8003aca` + buildup/colRange logging (uncommitted).
+localSupportFraction=0.15, minFillRatio=0.20, minGateHeightFraction=
+0.08 (floor=25px), frameBiasCap=0.55.
+
+### Detection results — 30 false positive hand swipe detections
+
+| # | blob | hR | wR | fill | run | need | dir | detY | rawDetY | buildup |
+|---|------|------|------|------|-----|------|-----|------|---------|---------|
+| 1 | 95×147 | 0.46 | 0.53 | 0.44 | 43 | 25 | R>L | 155 | 155 | 1 |
+| 2 | 144×120 | 0.38 | 0.80 | 0.22 | 31 | 25 | L>R | 139 | 139 | 1 |
+| 3 | 117×136 | 0.43 | 0.65 | 0.25 | 30 | 25 | L>R | 176 | 219 | 2 |
+| 4 | 159×144 | 0.45 | 0.88 | 0.21 | 36 | 25 | L>R | 146 | 146 | 1 |
+| 5 | 141×151 | 0.47 | 0.78 | 0.23 | 25 | 25 | L>R | 154 | 154 | 1 |
+| 6 | 80×108 | 0.34 | 0.44 | 0.43 | 57 | 25 | R>L | 168 | 168 | 2 |
+| 7 | 106×129 | 0.40 | 0.59 | 0.34 | 26 | 25 | R>L | 176 | 208 | 1 |
+| 8 | 107×145 | 0.45 | 0.59 | 0.27 | 25 | 25 | R>L | 176 | 200 | 2 |
+| 9 | 93×116 | 0.36 | 0.52 | 0.25 | 26 | 25 | R>L | 113 | 113 | 1 |
+| 10 | 105×112 | 0.35 | 0.58 | 0.28 | 40 | 25 | R>L | 128 | 128 | 1 |
+| 11 | 58×115 | 0.36 | 0.32 | 0.42 | 35 | 25 | L>R | 40 | 40 | 1 |
+| 12 | 91×183 | 0.57 | 0.51 | 0.25 | 32 | 27 | R>L | 88 | 88 | 1 |
+| 13 | 107×105 | 0.33 | 0.59 | 0.24 | 47 | 25 | R>L | 142 | 142 | 1 |
+| 14 | 111×177 | 0.55 | 0.62 | 0.22 | 27 | 26 | R>L | 137 | 137 | 3 |
+| 15 | 129×114 | 0.36 | 0.72 | 0.33 | 25 | 25 | R>L | 176 | 196 | 2 |
+| 16 | 111×144 | 0.45 | 0.62 | 0.23 | 30 | 25 | R>L | 141 | 141 | 5 |
+| 17 | 120×133 | 0.42 | 0.67 | 0.37 | 28 | 25 | R>L | 176 | 200 | 2 |
+| 18 | 119×144 | 0.45 | 0.66 | 0.27 | 25 | 25 | R>L | 176 | 194 | 2 |
+| 19 | 138×129 | 0.40 | 0.77 | 0.29 | 25 | 25 | R>L | 176 | 212 | 1 |
+| 20 | 117×118 | 0.37 | 0.65 | 0.59 | 35 | 25 | R>L | 164 | 164 | 1 |
+| 21 | 133×141 | 0.44 | 0.74 | 0.44 | 44 | 25 | R>L | 154 | 154 | 1 |
+| 22 | 132×112 | 0.35 | 0.73 | 0.29 | 27 | 25 | R>L | 67 | 67 | 1 |
+| 23 | 152×131 | 0.41 | 0.84 | 0.27 | 31 | 25 | R>L | 71 | 71 | 1 |
+| 24 | 138×164 | 0.51 | 0.77 | 0.34 | 48 | 25 | R>L | 69 | 69 | 1 |
+| 25 | 93×137 | 0.43 | 0.52 | 0.26 | 27 | 25 | R>L | 27 | 27 | 1 |
+| 26 | 150×132 | 0.41 | 0.83 | 0.34 | 31 | 25 | R>L | 109 | 109 | 1 |
+| 27 | 158×133 | 0.42 | 0.88 | 0.30 | 39 | 25 | R>L | 81 | 81 | 1 |
+| 28 | 143×121 | 0.38 | 0.79 | 0.22 | 27 | 25 | R>L | 81 | 81 | 1 |
+| 29 | 150×125 | 0.39 | 0.83 | 0.34 | 31 | 25 | R>L | 68 | 68 | 1 |
+| 30 | 113×113 | 0.35 | 0.63 | 0.51 | 26 | 25 | R>L | 207 | 244 | 1 |
+
+### DETECT_DIAG colRange summary
+
+| # | colRange | colMin | avg |
+|---|----------|--------|-----|
+| 1 | 5 | 41 | 43 |
+| 2 | 18 | 19 | 31 |
+| 3 | 22 | 23 | 30 |
+| 4 | 19 | 19 | 36 |
+| 5 | 16 | 15 | 25 |
+| 6 | 73 | 25 | 57 |
+| 7 | 6 | 23 | 26 |
+| 8 | 9 | 18 | 25 |
+| 9 | 35 | 14 | 26 |
+| 10 | 12 | 32 | 40 |
+| 11 | 18 | 26 | 35 |
+| 12 | 42 | 3 | 32 |
+| 13 | 8 | 41 | 47 |
+| 14 | 18 | 21 | 27 |
+| 15 | 8 | 18 | 25 |
+| 16 | 23 | 22 | 30 |
+| 17 | 2 | 26 | 28 |
+| 18 | 3 | 23 | 25 |
+| 19 | 1 | 25 | 25 |
+| 20 | 2 | 35 | 35 |
+| 21 | 2 | 42 | 44 |
+| 22 | 9 | 24 | 27 |
+| 23 | 9 | 30 | 31 |
+| 24 | 2 | 47 | 48 |
+| 25 | 12 | 19 | 27 |
+| 26 | 5 | 28 | 31 |
+| 27 | 21 | 26 | 39 |
+| 28 | 2 | 26 | 27 |
+| 29 | 4 | 29 | 31 |
+| 30 | 17 | 26 | 26 |
+
+### Key findings — column-range hypothesis INVALIDATED
+
+Test L found hand swipe colRange=1–9, body crossing colRange=5–52,
+and proposed colRange≥10 as a discriminator. **Test M disproves this.**
+
+Varied hand swipe types produce colRange across the full range:
+- colRange ≤ 9: 16/30 (53%)
+- colRange 10–22: 9/30 (30%)
+- colRange ≥ 23: 5/30 (17%)
+
+The Test L finding was an artifact of one swipe style (circular arm
+motion produces uniform column coverage). Single-arm reaches and
+other swipe types produce highly uneven coverage, mimicking body
+crossings.
+
+### Feature distributions — no single clean discriminator
+
+Compared to Test L body crossings (#17–#28):
+
+| feature | hand swipes (Test M) | body crossings (Test L) | overlap |
+|---------|---------------------|------------------------|---------|
+| hR | 0.33–0.57 | 0.52–1.00 | 0.52–0.57 |
+| blob height | 105–183 | 168–320 | 168–183 |
+| run | 25–57 | 25–288 | 25–57 (full) |
+| fill | 0.21–0.59 | 0.21–0.61 | near-total |
+| colRange | 1–73 | 5–52 | near-total |
+| buildup | 1–5 (73% at 1) | not measured yet | — |
+
+**hR (height ratio)** has the least overlap: hand swipes max at 0.57,
+body crossings start at 0.52. But 3/12 body crossings have hR ≤ 0.57
+(#20=0.53, #22=0.52, #27=0.55), so an hR threshold would reject real
+crossings.
+
+**Buildup** shows 73% of hand swipes fire at buildup=1 (first frame).
+Body crossing buildup was not measured in Test L (logging added after
+that run). Needs a new body crossing test with buildup logging.
+
+### What PF might be doing differently
+
+All 30 hand swipes passed our detector. PF (presumably) rejects them.
+Since no single geometric feature cleanly separates arms from early
+torso, PF may use:
+1. **Higher resolution** — at 1080p the horizontal width of arm vs
+   torso at the gate is very different
+2. **Background model** — subtracting a learned background would make
+   arm blobs much smaller/sparser than frame-differencing does
+3. **Temporal confirmation** — requiring N consecutive qualifying frames
+   (body approaches gradually, arm spikes in 1 frame)
+4. **Minimum blob height threshold higher than ours** — PF may simply
+   require hR > 0.50 or similar, accepting the delayed detection
+
+### Next test needed
+
+Run **body crossings with lean** using the current build (with buildup
+logging) to measure body crossing buildup values. If body crossings
+consistently have buildup ≥ 3 while hand swipes are mostly 1, temporal
+confirmation becomes viable.
+
+---
