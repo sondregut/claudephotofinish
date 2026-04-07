@@ -73,6 +73,7 @@ final class DetectionEngine {
     private let localSupportFraction: Float = 0.25
     private let minFillRatio: Float = 0.25       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
+    private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
     // Gate
@@ -271,6 +272,13 @@ final class DetectionEngine {
 
         guard let candidate = best else { return nil }
 
+        // §12.5 frame-Y bias cap (hypothesis B): clamp picker output to top N% of frame.
+        // If the picker lands below the cap (deeper into legs on lean crossings), snap up
+        // to the cap. Safety floor: never clamp above the blob's topmost pixel.
+        // Interpolation (detRow below) still uses the ORIGINAL picker Y for timing accuracy.
+        let frameCap = Int(Float(processHeight) * frameBiasCap)
+        let clampedDetY = max(candidate.comp.minY, min(candidate.detY, frameCap))
+
         // Log all size-qualified components for diagnostics
         let qualComps = components.filter { $0.height >= minH && $0.width >= minW }
         if qualComps.count > 1 || true {
@@ -364,8 +372,8 @@ final class DetectionEngine {
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime, expMs, isoVal))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal))
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
@@ -382,7 +390,7 @@ final class DetectionEngine {
             dBefore: dBefore,
             dAfter: dAfter,
             movingLeftToRight: movingLeftToRight,
-            gateY: candidate.detY,
+            gateY: clampedDetY,
             componentBounds: CGRect(
                 x: CGFloat(c.minX) / CGFloat(W),
                 y: CGFloat(c.minY) / CGFloat(H),
