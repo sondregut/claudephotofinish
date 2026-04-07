@@ -887,6 +887,12 @@ final class DetectionEngine {
     // contiguous run, total mask pixels, distinct run count, and largest
     // interior gap. Lets us distinguish "sparse mask" (lng ≈ tot) from
     // "gappy mask" (tot >> lng) when picking the next fix.
+    //
+    // Test G (2026-04-07) follow-up: also tracks topmost mask pixel,
+    // topmost run, and second-longest run per column. These are needed
+    // to design the picker fix for the lean-severity bias — see
+    // detector_hypotheses.md §11. Diagnostic-only; analyzeGate still
+    // uses the longest-run midpoint exactly as before.
 
     private struct ColStats {
         var longest: Int
@@ -895,6 +901,15 @@ final class DetectionEngine {
         var totalPx: Int
         var runCount: Int
         var maxGap: Int
+        // §11 fields (Test G follow-up): used to evaluate candidate
+        // picker rules against existing logs without changing behavior.
+        var topmostMaskY: Int   // y of topmost non-zero mask pixel, -1 if none
+        var topmostLen: Int     // length of topmost run, 0 if none
+        var topmostStart: Int   // y of first pixel of topmost run, -1 if none
+        var topmostEnd: Int     // y of last pixel of topmost run, -1 if none
+        var secondLen: Int      // length of second-longest run, 0 if none
+        var secondStart: Int    // y of first pixel of second-longest run, -1 if none
+        var secondEnd: Int      // y of last pixel of second-longest run, -1 if none
     }
 
     private func columnStats(gx: Int, comp: Component) -> ColStats {
@@ -902,6 +917,13 @@ final class DetectionEngine {
         var longest = 0
         var longestStart = -1
         var longestEnd = -1
+        var secondLen = 0
+        var secondStart = -1
+        var secondEnd = -1
+        var topmostMaskY = -1
+        var topmostLen = 0
+        var topmostStart = -1
+        var topmostEnd = -1
         var curRun = 0
         var curRunStart = -1
         var totalPx = 0
@@ -909,8 +931,34 @@ final class DetectionEngine {
         var maxGap = 0
         var curGap = 0
         var seenRun = false
+
+        // Closes the currently open run (curRun > 0 implied) and folds it
+        // into the longest / second-longest / topmost trackers.
+        func closeRun(endY: Int) {
+            // Topmost run = the first run encountered scanning top-down.
+            if topmostLen == 0 {
+                topmostLen = curRun
+                topmostStart = curRunStart
+                topmostEnd = endY
+            }
+            // Maintain top-2 by length.
+            if curRun > longest {
+                secondLen = longest
+                secondStart = longestStart
+                secondEnd = longestEnd
+                longest = curRun
+                longestStart = curRunStart
+                longestEnd = endY
+            } else if curRun > secondLen {
+                secondLen = curRun
+                secondStart = curRunStart
+                secondEnd = endY
+            }
+        }
+
         for y in comp.minY...comp.maxY {
             if maskBuf[y * W + gx] != 0 {
+                if topmostMaskY == -1 { topmostMaskY = y }
                 if curRun == 0 {
                     runCount += 1
                     curRunStart = y
@@ -921,22 +969,24 @@ final class DetectionEngine {
                 curGap = 0
                 seenRun = true
             } else {
-                if curRun > longest {
-                    longest = curRun
-                    longestStart = curRunStart
-                    longestEnd = y - 1
+                if curRun > 0 {
+                    closeRun(endY: y - 1)
+                    curRun = 0
                 }
-                curRun = 0
                 if seenRun { curGap += 1 }
             }
         }
-        if curRun > longest {
-            longest = curRun
-            longestStart = curRunStart
-            longestEnd = comp.maxY
+        if curRun > 0 {
+            closeRun(endY: comp.maxY)
         }
-        return ColStats(longest: longest, longestStart: longestStart, longestEnd: longestEnd,
-                        totalPx: totalPx, runCount: runCount, maxGap: maxGap)
+
+        return ColStats(
+            longest: longest, longestStart: longestStart, longestEnd: longestEnd,
+            totalPx: totalPx, runCount: runCount, maxGap: maxGap,
+            topmostMaskY: topmostMaskY,
+            topmostLen: topmostLen, topmostStart: topmostStart, topmostEnd: topmostEnd,
+            secondLen: secondLen, secondStart: secondStart, secondEnd: secondEnd
+        )
     }
 
     private func logGateDiag(comp: Component, columns: [Int], need: Int, avg: Int,
@@ -954,6 +1004,7 @@ final class DetectionEngine {
             // Mark the 3 columns that fed the winning (or best-so-far) slice
             let inWin = winStart >= 0 && ci >= winStart && ci < winStart + sliceWidth
             let marker = inWin ? ">" : " "
+            // Existing fields (kept verbatim for backward compat with Test A–G logs).
             if s.longest > 0 {
                 detail += String(format: "%@c%d:lng=%d@%d..%d/tot=%d/runs=%d/maxGap=%d",
                                  marker, gx,
@@ -962,6 +1013,19 @@ final class DetectionEngine {
             } else {
                 detail += String(format: "%@c%d:lng=0/tot=%d/runs=%d/maxGap=%d",
                                  marker, gx, s.totalPx, s.runCount, s.maxGap)
+            }
+            // §11 fields (Test G follow-up): topmost mask y, topmost run,
+            // second-longest run. See detector_hypotheses.md §11.4/§11.5.
+            detail += "/tmY=\(s.topmostMaskY)"
+            if s.topmostLen > 0 {
+                detail += "/top=\(s.topmostLen)@\(s.topmostStart)..\(s.topmostEnd)"
+            } else {
+                detail += "/top=0"
+            }
+            if s.secondLen > 0 {
+                detail += "/2nd=\(s.secondLen)@\(s.secondStart)..\(s.secondEnd)"
+            } else {
+                detail += "/2nd=0"
             }
         }
         print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
