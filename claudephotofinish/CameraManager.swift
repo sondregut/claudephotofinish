@@ -17,6 +17,37 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var timerStart: Date? = nil
     @Published var runNumber: Int = 1
 
+    // MARK: Camera tuning (exposed to the UI)
+    //
+    // Max shutter the *auto* exposure algo is allowed to pick. iOS session
+    // presets silently clamp this to ~25 ms regardless of what you set, so
+    // `configureSession` uses `setActiveFormat:` instead of a preset. Shorter
+    // cap → sharper motion edges at the gate → less fat mask → better detY.
+    // High ISO (noise) is cheap for our pipeline: frame-differencing with the
+    // `diffThreshold=15` binary mask kills per-frame noise, and downstream
+    // blob filters kill any speckles that do survive.
+    /// Max shutter duration the auto-exposure algorithm is allowed to pick.
+    /// `nil` means "use the active format's built-in default" (sets
+    /// `activeMaxExposureDuration = .invalid`). This is the lever for
+    /// matching Photo Finish sharpness — short cap + auto-ISO, same as PF.
+    @Published var maxExposureCapMs: Double? = 4.0 {
+        didSet { applyExposureSettings() }
+    }
+    @Published var isManualExposure: Bool = false {
+        didSet { applyExposureSettings() }
+    }
+    @Published var manualExposureMs: Double = 4.0 {
+        didSet { if isManualExposure { applyExposureSettings() } }
+    }
+    @Published var manualISO: Float = 400 {
+        didSet { if isManualExposure { applyExposureSettings() } }
+    }
+
+    // Live readouts sampled from the capture queue. Updated ~once/sec to avoid
+    // thrashing SwiftUI on the main thread.
+    @Published var currentExposureMs: Double = 0
+    @Published var currentISO: Float = 0
+
     // MARK: Camera
 
     let captureSession = AVCaptureSession()
@@ -42,6 +73,12 @@ final class CameraManager: NSObject, ObservableObject {
     private var frameCount: Int = 0
     private var droppedFrameCount: Int = 0
     private var previousPlaneCopy: YUVPlaneCopy?
+    // [CAM] log de-spam: only print when exposure/iso/cap actually change.
+    private var lastLoggedExpMs: Double = -1
+    private var lastLoggedISO: Float = -1
+    private var lastLoggedCapMs: Double = -1
+    // [GAP] stall measurement: wall-clock time of last captureOutput entry.
+    private var lastCaptureWallTime: CFAbsoluteTime = 0
 
     // MARK: Init
 
@@ -59,11 +96,17 @@ final class CameraManager: NSObject, ObservableObject {
 
     private func configureSession() {
         captureSession.beginConfiguration()
-        captureSession.sessionPreset = .hd1280x720
+        // NOTE: intentionally no `sessionPreset`. Session presets silently
+        // clamp `activeMaxExposureDuration` to ~25 ms, which is what was
+        // producing the motion blur we saw in Test B / Test C thumbnails.
+        // Picking the format manually via `setActiveFormat:` lifts that clamp
+        // and lets us cap the auto-exposure shutter at something much shorter.
+        // When you set `activeFormat` on a device in a session, the session
+        // switches to `.inputPriority` automatically.
 
         addCamera(position: .back)
 
-        // 420v: native Y plane for grayscale detection, CbCr for color thumbnails
+        // 420v: native camera format, video-range Y [16-235] for detection, CbCr for color thumbnails
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
         ]
@@ -74,14 +117,15 @@ final class CameraManager: NSObject, ObservableObject {
             captureSession.addOutput(videoOutput)
         }
 
-        // Request portrait orientation
+        // Request portrait orientation + disable stabilization
         if let connection = videoOutput.connection(with: .video) {
             if connection.isVideoRotationAngleSupported(90) {
                 connection.videoRotationAngle = 90
             }
+            connection.preferredVideoStabilizationMode = .off
         }
 
-        lockFrameRate()
+        applyCameraFormat()
         captureSession.commitConfiguration()
     }
 
@@ -89,6 +133,12 @@ final class CameraManager: NSObject, ObservableObject {
         guard let device = AVCaptureDevice.default(
             .builtInWideAngleCamera, for: .video, position: position
         ) else { return }
+
+        // Disable Center Stage on devices that support it — it crops/pans the frame
+        if #available(iOS 16.0, *), AVCaptureDevice.isCenterStageEnabled {
+            AVCaptureDevice.centerStageControlMode = .cooperative
+            AVCaptureDevice.isCenterStageEnabled = false
+        }
 
         guard let input = try? AVCaptureDeviceInput(device: device) else { return }
 
@@ -102,18 +152,149 @@ final class CameraManager: NSObject, ObservableObject {
         }
     }
 
-    private func lockFrameRate() {
+    /// Pick a 1280×720 @ 30 fps 420v format explicitly (bypasses session-preset
+    /// clamps on `activeMaxExposureDuration`), lock frame rate, then apply the
+    /// current exposure settings. Called from `configureSession` and on every
+    /// camera switch.
+    private func applyCameraFormat() {
         guard let device = currentInput?.device else { return }
         try? device.lockForConfiguration()
+
+        // Find a 1280×720 @ 30 fps 420v format. Fall back to any 1280×720 @ 30
+        // format if the exact pixel-format match is missing on this device.
+        let wanted420v = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
+        let candidates = device.formats.filter { fmt in
+            let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+            guard dims.width == 1280 && dims.height == 720 else { return false }
+            let supports30 = fmt.videoSupportedFrameRateRanges.contains { r in
+                r.minFrameRate <= 30 && r.maxFrameRate >= 30
+            }
+            return supports30
+        }
+
+        // DIAG: dump every candidate 1280×720 format so we can see whether
+        // any of them natively has a shorter `maxExposureDuration` than the
+        // default `.hd1280x720` preset. Photo Finish might be achieving its
+        // sharpness by picking a high-frame-rate-capable format (where the
+        // sensor's max integration time is natively short) rather than by
+        // setting `activeMaxExposureDuration` explicitly.
+        print("[FORMAT_DUMP] available 1280x720 formats (\(candidates.count)):")
+        for (i, fmt) in candidates.enumerated() {
+            let sub = CMFormatDescriptionGetMediaSubType(fmt.formatDescription)
+            let subStr = String(format: "%c%c%c%c",
+                                (sub >> 24) & 0xff, (sub >> 16) & 0xff,
+                                (sub >> 8) & 0xff, sub & 0xff)
+            let fpsRanges = fmt.videoSupportedFrameRateRanges.map {
+                String(format: "%.0f-%.0f", $0.minFrameRate, $0.maxFrameRate)
+            }.joined(separator: ",")
+            let minMs = CMTimeGetSeconds(fmt.minExposureDuration) * 1000
+            let maxMs = CMTimeGetSeconds(fmt.maxExposureDuration) * 1000
+            print(String(
+                format: "[FORMAT_DUMP]  #%d subtype=%@ fps=[%@] exp=%.3f..%.1fms iso=%.0f..%.0f binned=%@ hiRes=%@",
+                i, subStr, fpsRanges, minMs, maxMs, fmt.minISO, fmt.maxISO,
+                fmt.isVideoBinned ? "Y" : "n",
+                fmt.isHighPhotoQualitySupported ? "Y" : "n"
+            ))
+        }
+
+        let target = candidates.first { fmt in
+            CMFormatDescriptionGetMediaSubType(fmt.formatDescription) == wanted420v
+        } ?? candidates.first
+
+        if let fmt = target {
+            device.activeFormat = fmt
+            let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
+            let minExpMs = CMTimeGetSeconds(fmt.minExposureDuration) * 1000
+            let maxExpMs = CMTimeGetSeconds(fmt.maxExposureDuration) * 1000
+            print(String(
+                format: "[CAMERA_CFG] format=%dx%d exposureRange=%.2f..%.2fms isoRange=%.0f..%.0f",
+                dims.width, dims.height,
+                minExpMs, maxExpMs,
+                fmt.minISO, fmt.maxISO
+            ))
+        } else {
+            print("[CAMERA_CFG] WARNING: no 1280x720@30 format found, using device default")
+        }
+
+        // Lock frame rate
         device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
         device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+
         device.unlockForConfiguration()
+
+        // Apply exposure cap / manual mode on top of the new format.
+        applyExposureSettings()
+    }
+
+    /// Configure auto-exposure cap or fully-manual exposure per the
+    /// `maxExposureCapMs` / `isManualExposure` / `manualExposureMs` /
+    /// `manualISO` published properties. Safe to call from the UI thread —
+    /// device locking is cheap and only happens on property change.
+    private func applyExposureSettings() {
+        guard let device = currentInput?.device else { return }
+
+        do {
+            try device.lockForConfiguration()
+        } catch {
+            print("[CAMERA_CFG] lockForConfiguration failed: \(error)")
+            return
+        }
+        defer { device.unlockForConfiguration() }
+
+        let fmt = device.activeFormat
+        let fmtMinExp = CMTimeGetSeconds(fmt.minExposureDuration)
+        let fmtMaxExp = CMTimeGetSeconds(fmt.maxExposureDuration)
+        let fmtMinISO = fmt.minISO
+        let fmtMaxISO = fmt.maxISO
+
+        if isManualExposure {
+            // Fully manual. Clamp to whatever the active format supports.
+            let expSec = min(max(manualExposureMs / 1000.0, fmtMinExp), fmtMaxExp)
+            let iso = min(max(manualISO, fmtMinISO), fmtMaxISO)
+            let expCM = CMTimeMakeWithSeconds(expSec, preferredTimescale: 1_000_000)
+            device.setExposureModeCustom(duration: expCM, iso: iso) { _ in }
+            print(String(
+                format: "[CAMERA_CFG] mode=MANUAL exp=%.2fms iso=%.0f",
+                expSec * 1000, iso
+            ))
+        } else if let capMs = maxExposureCapMs {
+            // Auto with a shutter cap. Keeps Photo-Finish-style adaptation
+            // (auto-ISO, adaptive) but prevents the shutter from going longer
+            // than the cap.
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            let capSec = min(max(capMs / 1000.0, fmtMinExp), fmtMaxExp)
+            let capCM = CMTimeMakeWithSeconds(capSec, preferredTimescale: 1_000_000)
+            device.activeMaxExposureDuration = capCM
+            print(String(
+                format: "[CAMERA_CFG] mode=AUTO maxExp=%.2fms (requested=%.2fms, fmt range %.2f..%.2fms)",
+                capSec * 1000, capMs, fmtMinExp * 1000, fmtMaxExp * 1000
+            ))
+        } else {
+            // iOS default — no cap override. This is the baseline test: what
+            // does the active format pick on its own? If the format still
+            // clamps to 25 ms, `setActiveFormat` alone isn't enough and the
+            // cap is mandatory.
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.activeMaxExposureDuration = .invalid
+            print("[CAMERA_CFG] mode=AUTO maxExp=<iOS default for format>")
+        }
     }
 
     func startSession() {
         processingQueue.async { [weak self] in
             self?.captureSession.startRunning()
             DispatchQueue.main.async { self?.isSessionRunning = true }
+        }
+        // Warm the vImage thumbnail pipeline on the same queue the real
+        // per-crossing thumbnail work uses, so first-touch JIT/page-in
+        // happens long before any user can tap Start. Without this the
+        // first crossing drops ~17 capture frames.
+        DispatchQueue.global(qos: .utility).async {
+            DetectionEngine.prewarmThumbnail()
         }
     }
 
@@ -133,12 +314,13 @@ final class CameraManager: NSObject, ObservableObject {
             if connection.isVideoRotationAngleSupported(90) {
                 connection.videoRotationAngle = 90
             }
+            connection.preferredVideoStabilizationMode = .off
             if next == .front {
                 connection.isVideoMirrored = true
             }
         }
 
-        lockFrameRate()
+        applyCameraFormat()
         captureSession.commitConfiguration()
         engine.isFrontCamera = (next == .front)
         print("[CAMERA] switched to \(next == .front ? "front" : "back")")
@@ -150,15 +332,13 @@ final class CameraManager: NSObject, ObservableObject {
         crossings = []
         timerStart = Date()
         frameCount = 0
+        droppedFrameCount = 0   // discard idle-period drops
+        lastCaptureWallTime = 0 // start [GAP] measurement fresh
         previousPlaneCopy = nil
         engine.isFrontCamera = (cameraPosition == .front)
         engine.start()
         isDetecting = true
         print("[SESSION] detection started, run #\(runNumber)")
-
-        // Pre-warm CGContext + JPEG encoder on background thread
-        // to eliminate first-detection cold start frame drops
-        processingQueue.async { DetectionEngine.prewarmThumbnail() }
     }
 
     func stopDetection() {
@@ -174,6 +354,21 @@ final class CameraManager: NSObject, ObservableObject {
         runNumber += 1
         engine.reset()
         print("[SESSION] reset, starting run #\(runNumber)")
+    }
+
+    /// Update a lap's ground-truth mark. `point` is in the 180×320 source
+    /// coordinate space (same as `DetectionEngine.processWidth/Height`).
+    func markLapPoint(id: UUID, point: CGPoint) {
+        guard let idx = crossings.firstIndex(where: { $0.id == id }) else { return }
+        let lap = crossings[idx]
+        crossings[idx].userMarkedPoint = point
+        let ux = Int(point.x.rounded())
+        let uy = Int(point.y.rounded())
+        let dy = uy - lap.gateY
+        print(String(
+            format: "[USER_MARK] #%d detY=%d userY=%d Δy=%+d userX=%d time=%.3f",
+            lap.crossingNumber, lap.gateY, uy, dy, ux, lap.time
+        ))
     }
 
     // MARK: - Motion
@@ -216,6 +411,54 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        // Telemetry runs on every frame regardless of detection state so we
+        // can see what iOS is picking in idle (before any run starts). Only
+        // the detection pipeline itself is gated on `isDetecting`.
+        frameCount += 1
+        let expDur = currentInput?.device.exposureDuration
+        let isoVal = currentInput?.device.iso
+
+        // Wall-clock gap measurement. Only log gaps > 50ms (>1 frame skipped)
+        // to find where on the timeline the pipeline stalls. Tells us whether
+        // a stall is on processingQueue or upstream of us.
+        let nowWall = CFAbsoluteTimeGetCurrent()
+        if lastCaptureWallTime > 0 {
+            let gapMs = (nowWall - lastCaptureWallTime) * 1000
+            if gapMs > 50 {
+                print(String(format: "[GAP] %.0fms gap before frame=%d", gapMs, frameCount))
+            }
+        }
+        lastCaptureWallTime = nowWall
+
+        // Camera state log: only fires when exposure / iso / cap actually
+        // changes (rounded to 0.1ms / 1 ISO / 0.1ms). Sampled at most ~1 Hz.
+        if frameCount % 30 == 0, let exp = expDur, let iso = isoVal {
+            let expMs = CMTimeGetSeconds(exp) * 1000
+            let capMs: Double
+            if let device = currentInput?.device {
+                let cap = device.activeMaxExposureDuration
+                capMs = CMTIME_IS_VALID(cap) ? CMTimeGetSeconds(cap) * 1000 : -1
+            } else {
+                capMs = -1
+            }
+            let expChanged = abs(expMs - lastLoggedExpMs) >= 0.1
+            let isoChanged = abs(iso - lastLoggedISO) >= 1
+            let capChanged = abs(capMs - lastLoggedCapMs) >= 0.1
+            if expChanged || isoChanged || capChanged {
+                print(String(
+                    format: "[CAM] exp=%.2fms iso=%.0f cap=%.2fms frame=%d detecting=%@",
+                    expMs, iso, capMs, frameCount, isDetecting ? "YES" : "no"
+                ))
+                lastLoggedExpMs = expMs
+                lastLoggedISO = iso
+                lastLoggedCapMs = capMs
+            }
+            DispatchQueue.main.async { [weak self] in
+                self?.currentExposureMs = expMs
+                self?.currentISO = iso
+            }
+        }
+
         guard isDetecting, isPhoneStable else { return }
 
         // Log accumulated frame drops as a single summary
@@ -227,14 +470,15 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard let pb = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         let ts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        let expDur = currentInput?.device.exposureDuration
-        frameCount += 1
 
         // Copy current frame's YUV planes before processing result —
         // we need this both for the thumbnail and to keep as "previous" for next frame.
         let currentPlaneCopy = Self.copyYUVPlanes(from: pb)
 
-        guard let result = engine.processFrame(pb, timestamp: ts, exposureDuration: expDur) else {
+        guard let result = engine.processFrame(
+            pb, timestamp: ts,
+            exposureDuration: expDur, iso: isoVal
+        ) else {
             previousPlaneCopy = currentPlaneCopy
             return
         }
@@ -278,7 +522,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                     dBefore: result.dBefore,
                     dAfter: result.dAfter,
                     direction: result.movingLeftToRight ? "L>R" : "R>L",
-                    usedPreviousFrame: usePrevious
+                    usedPreviousFrame: usePrevious,
+                    isFrontCamera: isFront,
+                    userMarkedPoint: nil
                 )
                 self.crossings.append(record)
                 print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")

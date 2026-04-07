@@ -116,6 +116,10 @@ Do **not** start with:
 - heavy background subtraction
 - complicated heuristics unsupported by tests
 
+## Pipeline Audit
+
+- [pipeline_audit.md](pipeline_audit.md) — full comparison of our implementation vs Photo Finish spec, with open issues, fixes applied, and tests needed
+
 ## Research Notes
 
 Use these before inventing detector behavior:

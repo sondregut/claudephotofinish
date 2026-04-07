@@ -3,6 +3,7 @@ import CoreMedia
 import CoreVideo
 import UIKit
 import ImageIO
+import Accelerate
 
 // MARK: - Detection Result
 
@@ -36,6 +37,9 @@ private struct GateAnalysis {
     var hasQualifyingSlice: Bool
     var detectionY: Int
     var maxVerticalRun: Int
+    // Start index (into the columns array) of the 3-column sliding window that
+    // produced the winning score. -1 when no window was scored.
+    var winWindowStart: Int
 }
 
 // MARK: - Detection Engine
@@ -45,7 +49,9 @@ final class DetectionEngine {
     // Processing resolution (portrait: width < height)
     let processWidth  = 180
     let processHeight = 320
-    private let scale = 4    // downsample factor
+    private var scaleX = 4             // horizontal downsample factor, computed from actual frame
+    private var scaleY = 4             // vertical downsample factor, computed from actual frame
+    private var lastFullW = 0          // track frame size changes (camera switch)
 
     // Buffers
     private var bufferA: [UInt8]
@@ -61,7 +67,7 @@ final class DetectionEngine {
     private var previousExposureDuration: CMTime?
 
     // Thresholds (from spec)
-    private let diffThreshold: UInt8    = 25
+    private let diffThreshold: UInt8    = 15
     private let heightFraction: Float   = 0.33
     private let widthFraction:  Float   = 0.08
     private let localSupportFraction: Float = 0.25
@@ -70,7 +76,7 @@ final class DetectionEngine {
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
     // Gate
-    private var gateColumn: Int { processWidth / 2 }
+    var gateColumn: Int { processWidth / 2 }
     private let gateBandHalf: Int = 2
 
     // Session state
@@ -106,7 +112,8 @@ final class DetectionEngine {
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
-        print("[ENGINE] started, process=\(processWidth)x\(processHeight) scale=\(scale)")
+        lastFullW = 0
+        print("[ENGINE] started, process=\(processWidth)x\(processHeight)")
     }
 
     func stop() {
@@ -120,6 +127,7 @@ final class DetectionEngine {
         lastDetectionRealElapsed = nil
         hasPrevious = false
         frameIndex = 0
+        lastFullW = 0
     }
 
     // MARK: Main Processing
@@ -127,7 +135,8 @@ final class DetectionEngine {
     func processFrame(
         _ pixelBuffer: CVPixelBuffer,
         timestamp: CMTime,
-        exposureDuration: CMTime?
+        exposureDuration: CMTime?,
+        iso: Float?
     ) -> DetectionResult? {
         guard isActive else { return nil }
 
@@ -146,8 +155,15 @@ final class DetectionEngine {
         // Y plane may arrive landscape despite videoRotationAngle=90
         let isLandscape = fullW > fullH
 
-        if frameIndex == 1 {
-            print("[INIT] buffer=\(fullW)x\(fullH) bpr=\(bpr) landscape=\(isLandscape) process=\(processWidth)x\(processHeight)")
+        // Recompute scale whenever frame dimensions change (startup, camera switch)
+        if fullW != lastFullW {
+            lastFullW = fullW
+            let srcW = isLandscape ? fullH : fullW
+            let srcH = isLandscape ? fullW : fullH
+            scaleX = max(srcW / processWidth, 1)
+            scaleY = max(srcH / processHeight, 1)
+            hasPrevious = false  // don't diff across camera switches
+            print("[INIT] buffer=\(fullW)x\(fullH) bpr=\(bpr) landscape=\(isLandscape) process=\(processWidth)x\(processHeight) scaleX=\(scaleX) scaleY=\(scaleY)")
         }
 
         // Extract grayscale into current buffer
@@ -212,7 +228,7 @@ final class DetectionEngine {
         let gMin = max(gateColumn - gateBandHalf, 0)
         let gMax = min(gateColumn + gateBandHalf, W - 1)
 
-        var best: (comp: Component, detY: Int, run: Int)?
+        var best: (comp: Component, detY: Int, run: Int, winStart: Int)?
         var candidateCount = 0
         let frameAbsMin = Int(Float(H) * minGateHeightFraction)
 
@@ -243,7 +259,7 @@ final class DetectionEngine {
                 if analysis.hasQualifyingSlice {
                     candidateCount += 1
                     if best == nil || comp.area > best!.comp.area {
-                        best = (comp, analysis.detectionY, analysis.maxVerticalRun)
+                        best = (comp, analysis.detectionY, analysis.maxVerticalRun, analysis.winWindowStart)
                     }
                 } else {
                     let need = max(3, Int(Float(comp.height) * localSupportFraction), frameAbsMin)
@@ -342,8 +358,22 @@ final class DetectionEngine {
 
         let fR = Float(c.area) / Float(c.width * c.height)
         let dir = movingLeftToRight ? "L>R" : "R>L"
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime))
+        // Shutter + ISO on the frame that triggered the detection. These drive
+        // motion-blur width at the leading edge and are the primary suspects for
+        // the "detY lands on the densest stripe, not the leading edge" bias —
+        // see test_runs_our_detector.md Test B/C.
+        let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
+        let isoVal = iso ?? -1
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime, expMs, isoVal))
+
+        // DIAG: dump per-column gate stats for the winning blob
+        let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
+        let detectNeed = max(3, Int(Float(c.height) * localSupportFraction),
+                             Int(Float(H) * minGateHeightFraction))
+        logGateDiagPrefix("DETECT_DIAG", comp: c, columns: detectCols, need: detectNeed,
+                          avg: candidate.run, winStart: candidate.winStart,
+                          sliceWidth: min(sliceWidth, detectCols.count))
 
         return DetectionResult(
             crossingTime: crossingTime,
@@ -371,23 +401,24 @@ final class DetectionEngine {
         w: Int, h: Int, transpose: Bool, into dest: inout [UInt8]
     ) {
         let src = base.assumingMemoryBound(to: UInt8.self)
-        let s = scale
+        let sx = scaleX, sy = scaleY
 
         if transpose {
             // Y plane is landscape (fullW > fullH), rotate 90 for portrait
+            // bufX maps to portrait Y (uses scaleY), bufY maps to portrait X (uses scaleX)
             for ty in 0..<h {
-                let bufX = ty * s
+                let bufX = ty * sy
                 for tx in 0..<w {
-                    let bufY = tx * s
+                    let bufY = tx * sx
                     dest[ty * w + tx] = src[bufY * bpr + bufX]
                 }
             }
         } else {
             // Y plane is already portrait
             for ty in 0..<h {
-                let rowOff = ty * s * bpr
+                let rowOff = ty * sy * bpr
                 for tx in 0..<w {
-                    dest[ty * w + tx] = src[rowOff + tx * s]
+                    dest[ty * w + tx] = src[rowOff + tx * sx]
                 }
             }
         }
@@ -395,26 +426,36 @@ final class DetectionEngine {
 
     // MARK: - Color Thumbnail (from YUV 420v biplanar, callable externally)
 
-    /// Pre-warm CGContext + JPEG encoder to eliminate first-call cold start.
-    /// Call once on a background thread when detection starts.
+    /// Pre-warm the vImage thumbnail pipeline (conversion kernels, rotate, reflect,
+    /// CGImage wrap, JPEG encode) to eliminate first-call cold start which otherwise
+    /// drops ~17 capture frames the first time a crossing fires. Uses *real* 1280x720
+    /// dimensions because vImage can lazily build per-size code paths on first
+    /// encounter, and runs *both* orientation paths so switching cameras mid-session
+    /// stays warm. Caller MUST run this on `DispatchQueue.global(qos: .utility)` —
+    /// the same pool the real per-crossing thumbnail work uses — so any thread-pool
+    /// or QoS-class first-touch state is built on the path that matters.
     static func prewarmThumbnail() {
-        guard let ctx = CGContext(
-            data: nil, width: 1, height: 1,
-            bitsPerComponent: 8, bytesPerRow: 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return }
-        guard let img = ctx.makeImage() else { return }
-        let d = NSMutableData()
-        guard let dest = CGImageDestinationCreateWithData(d, "public.jpeg" as CFString, 1, nil) else { return }
-        CGImageDestinationAddImage(dest, img, [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
-        CGImageDestinationFinalize(dest)
+        let w = 1280, h = 720
+        let y = Data(repeating: 128, count: w * h)
+        let cbcr = Data(repeating: 128, count: (w / 2) * (h / 2) * 2)
+        // Back-camera path: transpose + horizontal flip (two vImage ops).
+        _ = colorThumbnailFromPlanes(
+            yData: y, yBpr: w,
+            cbcrData: cbcr, cbcrBpr: (w / 2) * 2,
+            fullW: w, fullH: h,
+            transpose: true, mirrorX: false)
+        // Front-camera path: transpose + mirror = pure 90° CW (one vImage op).
+        _ = colorThumbnailFromPlanes(
+            yData: y, yBpr: w,
+            cbcrData: cbcr, cbcrBpr: (w / 2) * 2,
+            fullW: w, fullH: h,
+            transpose: true, mirrorX: true)
     }
 
     static func colorThumbnail(
         from pixelBuffer: CVPixelBuffer,
         transpose: Bool, mirrorX: Bool = false,
-        thumbWidth: Int = 90, thumbHeight: Int = 160, scale: Int = 8
+        thumbWidth: Int = 720, thumbHeight: Int = 1280, scale: Int = 1
     ) -> Data? {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
@@ -432,7 +473,16 @@ final class DetectionEngine {
         let cbcrBpr = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 1)
 
         let w = thumbWidth, h = thumbHeight
-        let s = scale
+
+        // Compute scale from pixel buffer dimensions to cover full frame
+        let bufW = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let bufH = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let s: Int
+        if transpose {
+            s = max(max(bufW / h, 1), max(bufH / w, 1))
+        } else {
+            s = max(max(bufW / w, 1), max(bufH / h, 1))
+        }
 
         guard let context = CGContext(
             data: nil, width: w, height: h,
@@ -455,16 +505,16 @@ final class DetectionEngine {
                     bufY = ty * s
                 }
 
-                // Video-range BT.601: Y [16-235], CbCr [16-240]
+                // BT.709 video-range: Y [16-235], CbCr [16-240]
                 let C = Int(yBase[bufY * yBpr + bufX]) - 16
                 let cbcrOff = (bufY / 2) * cbcrBpr + (bufX / 2) * 2
-                let D = Int(cbcrBase[cbcrOff])     - 128
-                let E = Int(cbcrBase[cbcrOff + 1]) - 128
+                let Cb = Int(cbcrBase[cbcrOff])     - 128
+                let Cr = Int(cbcrBase[cbcrOff + 1]) - 128
 
-                // BT.601 video-range YCbCr -> RGB
-                var R = (298 * C + 409 * E + 128) >> 8
-                var G = (298 * C - 100 * D - 208 * E + 128) >> 8
-                var B = (298 * C + 516 * D + 128) >> 8
+                // BT.709 video-range YCbCr -> RGB
+                var R = (298 * C + 459 * Cr + 128) >> 8
+                var G = (298 * C - 55 * Cb - 136 * Cr + 128) >> 8
+                var B = (298 * C + 541 * Cb + 128) >> 8
 
                 R = min(max(R, 0), 255)
                 G = min(max(G, 0), 255)
@@ -485,7 +535,7 @@ final class DetectionEngine {
             mutableData, "public.jpeg" as CFString, 1, nil
         ) else { return nil }
         CGImageDestinationAddImage(dest, cgImage,
-            [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
+            [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         return mutableData as Data
     }
@@ -496,65 +546,128 @@ final class DetectionEngine {
         cbcrData: Data, cbcrBpr: Int,
         fullW: Int, fullH: Int,
         transpose: Bool, mirrorX: Bool = false,
-        thumbWidth: Int = 90, thumbHeight: Int = 160, scale: Int = 8
+        thumbWidth: Int = 720, thumbHeight: Int = 1280, scale: Int = 1
     ) -> Data? {
-        let w = thumbWidth, h = thumbHeight
-        let s = scale
+        // thumbWidth/thumbHeight/scale are vestigial — output is always at source resolution
+        // (after orientation), produced via Accelerate so we don't stall the capture pipeline.
+        _ = thumbWidth; _ = thumbHeight; _ = scale
 
-        guard let context = CGContext(
-            data: nil, width: w, height: h,
-            bitsPerComponent: 8, bytesPerRow: w * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
+        // 1. Build BT.709 video-range YpCbCr → ARGB conversion info.
+        var info = vImage_YpCbCrToARGB()
+        var pixelRange = vImage_YpCbCrPixelRange(
+            Yp_bias: 16, CbCr_bias: 128,
+            YpRangeMax: 235, CbCrRangeMax: 240,
+            YpMax: 255, YpMin: 0, CbCrMax: 255, CbCrMin: 0)
+        let infoErr = vImageConvert_YpCbCrToARGB_GenerateConversion(
+            kvImage_YpCbCrToARGBMatrix_ITU_R_709_2, &pixelRange, &info,
+            kvImage420Yp8_CbCr8, kvImageARGB8888,
+            vImage_Flags(kvImageNoFlags))
+        guard infoErr == kvImageNoError else { return nil }
 
-        guard let data = context.data else { return nil }
-        let dst = data.bindMemory(to: UInt8.self, capacity: w * h * 4)
+        // 2. Allocate destination at source resolution.
+        var rgbaBuf = vImage_Buffer()
+        let allocErr = vImageBuffer_Init(&rgbaBuf,
+                                         vImagePixelCount(fullH),
+                                         vImagePixelCount(fullW),
+                                         32, vImage_Flags(kvImageNoFlags))
+        guard allocErr == kvImageNoError else { return nil }
+        defer { free(rgbaBuf.data) }
 
-        yData.withUnsafeBytes { yRaw in
+        // 3. YUV planes → RGBA. permuteMap [1,2,3,0] turns ARGB output into RGBA.
+        var permute: (UInt8, UInt8, UInt8, UInt8) = (1, 2, 3, 0)
+        let convErr: vImage_Error = yData.withUnsafeBytes { yRaw in
             cbcrData.withUnsafeBytes { cbcrRaw in
-                let yPtr = yRaw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                let cbcrPtr = cbcrRaw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-
-                for ty in 0..<h {
-                    for tx in 0..<w {
-                        let bufX: Int, bufY: Int
-                        if transpose {
-                            bufX = ty * s; bufY = tx * s
-                        } else {
-                            bufX = tx * s; bufY = ty * s
-                        }
-
-                        let C = Int(yPtr[bufY * yBpr + bufX]) - 16
-                        let cbcrOff = (bufY / 2) * cbcrBpr + (bufX / 2) * 2
-                        let D = Int(cbcrPtr[cbcrOff])     - 128
-                        let E = Int(cbcrPtr[cbcrOff + 1]) - 128
-
-                        var R = (298 * C + 409 * E + 128) >> 8
-                        var G = (298 * C - 100 * D - 208 * E + 128) >> 8
-                        var B = (298 * C + 516 * D + 128) >> 8
-                        R = min(max(R, 0), 255)
-                        G = min(max(G, 0), 255)
-                        B = min(max(B, 0), 255)
-
-                        let dx = mirrorX ? (w - 1 - tx) : tx
-                        let dp = (ty * w + dx) * 4
-                        dst[dp]     = UInt8(R)
-                        dst[dp + 1] = UInt8(G)
-                        dst[dp + 2] = UInt8(B)
-                        dst[dp + 3] = 255
+                var yBuf = vImage_Buffer(
+                    data: UnsafeMutableRawPointer(mutating: yRaw.baseAddress!),
+                    height: vImagePixelCount(fullH),
+                    width: vImagePixelCount(fullW),
+                    rowBytes: yBpr)
+                var cbcrBuf = vImage_Buffer(
+                    data: UnsafeMutableRawPointer(mutating: cbcrRaw.baseAddress!),
+                    height: vImagePixelCount(fullH / 2),
+                    width: vImagePixelCount(fullW / 2),
+                    rowBytes: cbcrBpr)
+                return withUnsafePointer(to: &permute) { pPtr in
+                    pPtr.withMemoryRebound(to: UInt8.self, capacity: 4) { pBytes in
+                        vImageConvert_420Yp8_CbCr8ToARGB8888(
+                            &yBuf, &cbcrBuf, &rgbaBuf, &info,
+                            pBytes, 255,
+                            vImage_Flags(kvImageNoFlags))
                     }
                 }
             }
         }
+        guard convErr == kvImageNoError else { return nil }
 
-        guard let cgImage = context.makeImage() else { return nil }
+        // 4. Apply orientation. The legacy loop did out[ty][tx] = src[tx][ty] (matrix
+        //    transpose), with optional horizontal mirror. Decomposes to:
+        //      transpose, !mirror → 90° CW + horizontal flip
+        //      transpose,  mirror → 90° CW (the two horizontal flips cancel)
+        //      !transpose, mirror → horizontal flip
+        //      !transpose,!mirror → identity
+        let outW: Int
+        let outH: Int
+        if transpose { outW = fullH; outH = fullW }
+        else         { outW = fullW; outH = fullH }
+
+        var orientedBuf = vImage_Buffer()
+        let orientAllocErr = vImageBuffer_Init(&orientedBuf,
+                                               vImagePixelCount(outH),
+                                               vImagePixelCount(outW),
+                                               32, vImage_Flags(kvImageNoFlags))
+        guard orientAllocErr == kvImageNoError else { return nil }
+        defer { free(orientedBuf.data) }
+
+        if transpose {
+            var bg: (UInt8, UInt8, UInt8, UInt8) = (0, 0, 0, 255)
+            let rotErr = withUnsafePointer(to: &bg) { bgPtr in
+                bgPtr.withMemoryRebound(to: UInt8.self, capacity: 4) { bgBytes in
+                    vImageRotate90_ARGB8888(&rgbaBuf, &orientedBuf, 3, bgBytes,
+                                            vImage_Flags(kvImageNoFlags))
+                }
+            }
+            guard rotErr == kvImageNoError else { return nil }
+            if !mirrorX {
+                let flipErr = vImageHorizontalReflect_ARGB8888(
+                    &orientedBuf, &orientedBuf, vImage_Flags(kvImageNoFlags))
+                guard flipErr == kvImageNoError else { return nil }
+            }
+        } else if mirrorX {
+            let flipErr = vImageHorizontalReflect_ARGB8888(
+                &rgbaBuf, &orientedBuf, vImage_Flags(kvImageNoFlags))
+            guard flipErr == kvImageNoError else { return nil }
+        } else {
+            for r in 0..<outH {
+                memcpy(orientedBuf.data.advanced(by: r * orientedBuf.rowBytes),
+                       rgbaBuf.data.advanced(by: r * rgbaBuf.rowBytes),
+                       outW * 4)
+            }
+        }
+
+        // 5. Wrap as CGImage and JPEG-encode.
+        let bitmapInfo = CGBitmapInfo(rawValue:
+            CGBitmapInfo.byteOrder32Big.rawValue |
+            CGImageAlphaInfo.premultipliedLast.rawValue)
+        guard var format = vImage_CGImageFormat(
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            colorSpace: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: bitmapInfo,
+            renderingIntent: .defaultIntent
+        ) else { return nil }
+
+        var cgErr: vImage_Error = kvImageNoError
+        guard let cgImage = vImageCreateCGImageFromBuffer(
+            &orientedBuf, &format, nil, nil,
+            vImage_Flags(kvImageNoFlags), &cgErr
+        )?.takeRetainedValue() else { return nil }
+
         let mutableData = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(
             mutableData, "public.jpeg" as CFString, 1, nil
         ) else { return nil }
         CGImageDestinationAddImage(dest, cgImage,
-            [kCGImageDestinationLossyCompressionQuality: 0.5] as CFDictionary)
+            [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         return mutableData as Data
     }
@@ -726,6 +839,7 @@ final class DetectionEngine {
 
         var overallBestAvg = 0
         var overallBestMid = 0
+        var overallBestWi = -1
 
         for wi in windowIndices {
             // Average run across all columns in this window
@@ -740,23 +854,117 @@ final class DetectionEngine {
             if avgRun > overallBestAvg {
                 overallBestAvg = avgRun
                 overallBestMid = sumMid / sw
+                overallBestWi = wi
             }
 
             if avgRun >= minSupport {
                 return GateAnalysis(
                     hasQualifyingSlice: true,
                     detectionY: sumMid / sw,
-                    maxVerticalRun: avgRun
+                    maxVerticalRun: avgRun,
+                    winWindowStart: wi
                 )
             }
         }
 
         guard overallBestAvg > 0 else { return nil }
+        // DIAG: log near-misses (>=70% of need) so we can see column profiles
+        if overallBestAvg * 10 >= minSupport * 7 {
+            logGateDiag(comp: comp, columns: columns, need: minSupport,
+                        avg: overallBestAvg, winStart: overallBestWi, sliceWidth: sw)
+        }
         return GateAnalysis(
             hasQualifyingSlice: false,
             detectionY: overallBestMid,
-            maxVerticalRun: overallBestAvg
+            maxVerticalRun: overallBestAvg,
+            winWindowStart: overallBestWi
         )
+    }
+
+    // MARK: - Diagnostic: per-column gate stats
+    //
+    // Temporary instrumentation. For each gate-band column, prints longest
+    // contiguous run, total mask pixels, distinct run count, and largest
+    // interior gap. Lets us distinguish "sparse mask" (lng ≈ tot) from
+    // "gappy mask" (tot >> lng) when picking the next fix.
+
+    private struct ColStats {
+        var longest: Int
+        var longestStart: Int  // y of first pixel in longest run (-1 if none)
+        var longestEnd: Int    // y of last pixel in longest run (-1 if none)
+        var totalPx: Int
+        var runCount: Int
+        var maxGap: Int
+    }
+
+    private func columnStats(gx: Int, comp: Component) -> ColStats {
+        let W = processWidth
+        var longest = 0
+        var longestStart = -1
+        var longestEnd = -1
+        var curRun = 0
+        var curRunStart = -1
+        var totalPx = 0
+        var runCount = 0
+        var maxGap = 0
+        var curGap = 0
+        var seenRun = false
+        for y in comp.minY...comp.maxY {
+            if maskBuf[y * W + gx] != 0 {
+                if curRun == 0 {
+                    runCount += 1
+                    curRunStart = y
+                    if seenRun && curGap > maxGap { maxGap = curGap }
+                }
+                curRun += 1
+                totalPx += 1
+                curGap = 0
+                seenRun = true
+            } else {
+                if curRun > longest {
+                    longest = curRun
+                    longestStart = curRunStart
+                    longestEnd = y - 1
+                }
+                curRun = 0
+                if seenRun { curGap += 1 }
+            }
+        }
+        if curRun > longest {
+            longest = curRun
+            longestStart = curRunStart
+            longestEnd = comp.maxY
+        }
+        return ColStats(longest: longest, longestStart: longestStart, longestEnd: longestEnd,
+                        totalPx: totalPx, runCount: runCount, maxGap: maxGap)
+    }
+
+    private func logGateDiag(comp: Component, columns: [Int], need: Int, avg: Int,
+                             winStart: Int, sliceWidth: Int) {
+        logGateDiagPrefix("GATE_DIAG", comp: comp, columns: columns, need: need, avg: avg,
+                          winStart: winStart, sliceWidth: sliceWidth)
+    }
+
+    private func logGateDiagPrefix(_ tag: String, comp: Component, columns: [Int],
+                                   need: Int, avg: Int,
+                                   winStart: Int, sliceWidth: Int) {
+        var detail = ""
+        for (ci, gx) in columns.enumerated() {
+            let s = columnStats(gx: gx, comp: comp)
+            // Mark the 3 columns that fed the winning (or best-so-far) slice
+            let inWin = winStart >= 0 && ci >= winStart && ci < winStart + sliceWidth
+            let marker = inWin ? ">" : " "
+            if s.longest > 0 {
+                detail += String(format: "%@c%d:lng=%d@%d..%d/tot=%d/runs=%d/maxGap=%d",
+                                 marker, gx,
+                                 s.longest, s.longestStart, s.longestEnd,
+                                 s.totalPx, s.runCount, s.maxGap)
+            } else {
+                detail += String(format: "%@c%d:lng=0/tot=%d/runs=%d/maxGap=%d",
+                                 marker, gx, s.totalPx, s.runCount, s.maxGap)
+            }
+        }
+        print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
     }
 
     // MARK: - Logging
@@ -765,9 +973,9 @@ final class DetectionEngine {
         guard reason != lastRejectReason else { return }
         lastRejectReason = reason
         if detail.isEmpty {
-            print("[REJECT] \(reason)")
+            print("[REJECT] frame=\(frameIndex) \(reason)")
         } else {
-            print("[REJECT] \(reason) — \(detail)")
+            print("[REJECT] frame=\(frameIndex) \(reason) — \(detail)")
         }
     }
 }
