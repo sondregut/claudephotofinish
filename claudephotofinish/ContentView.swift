@@ -463,7 +463,6 @@ struct ContentView: View {
         let index = lap.crossingNumber - 1
         let lt = lapTime(for: lap)
         let isBest = bestLapTime != nil && index > 0 && lt == bestLapTime
-        let isStart = index == 0
         let cardW: CGFloat = 44
         let cardH: CGFloat = 58
         let cardSize = CGSize(width: cardW, height: cardH)
@@ -512,9 +511,9 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(isStart ? "Start" : "Lap \(index)")
+                Text("Lap \(index + 1)")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(isStart ? .blue : .primary)
+                    .foregroundStyle(.primary)
                 Text(formatTime(lap.time))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.secondary)

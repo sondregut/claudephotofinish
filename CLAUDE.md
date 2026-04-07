@@ -64,3 +64,18 @@ Six Swift files, no external dependencies:
 - Don't add body-pose estimation, explicit torso classifiers, or heavy background subtraction
 - When new evidence appears: update raw log → update spec → update inferences (keep layers separate)
 - Camera must use `.hd1280x720` preset (not `.high`) — scale=6 at 1080p drops thin motion edges and breaks detection
+
+## Operating Mode (active as of 2026-04-07)
+
+**Claude is in charge of the investigation loop for the next several sessions.** The user runs physical tests; Claude directs what to test, processes the results, and decides what to test next. Concretely, every session:
+
+1. **User pastes raw logs** from a physical test run (the `[CROSSING]`, `[DETECT]`, `[DETECT_DIAG]`, `[GATE_DIAG]`, `[REJECT]`, `[USER_MARK]`, `[GAP]`, `[FRAME_DROP]`, and `[CAM]` lines from the Xcode console) along with any verbal context about which crossings were upright sprints, leans, leg swipes, hand swipes, etc.
+2. **Claude updates the docs first**, in this fixed order:
+   - Append a new dated section to `test_runs_our_detector.md` (`## Run YYYY-MM-DD Test X — short scenario tag`) with the run table, USER_MARK Δy table, high-signal DETECT_DIAG excerpts, and observations.
+   - Append a follow-up section to `detector_hypotheses.md` (or update the latest one) confirming/refuting prior hypotheses against the new evidence and re-ranking what to suspect next.
+   - Only touch `detection_spec.md` / `detection_inferences.md` / `pipeline_audit.md` if a confirmed hypothesis actually changes the behavioral spec or the audit checklist.
+3. **Claude tells the user exactly which physical test to run next.** Be specific: scenario type (upright / lean / leg swipe / front cam / low light / two runners), how many crossings, whether parallel Photo Finish capture is required, what to mark with the on-screen tap, and what the test is supposed to distinguish (the "if PF picks low too then X, otherwise Y" framing).
+4. **No detector code changes** until a hypothesis is confirmed by *both* (a) our own logs and (b) parallel Photo Finish ground-truth data on the same scenario. Documentation-only iteration is the default; code changes are the exception, not the rule.
+5. **One issue isolated at a time.** The user has explicitly directed: forward-lean failure mode first, leg-in-front-of-body second, then everything else. Do not parallelize hypothesis investigation across scenarios — it muddies the data.
+
+The user's job in this loop is **only** to (a) run the tests Claude requests and (b) paste the resulting logs back. Claude does the analysis, the documentation updates, and the next-test decision. If Claude is unsure what to test next, it must say so explicitly and ask before guessing.
