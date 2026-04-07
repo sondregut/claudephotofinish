@@ -910,6 +910,13 @@ final class DetectionEngine {
         var secondLen: Int      // length of second-longest run, 0 if none
         var secondStart: Int    // y of first pixel of second-longest run, -1 if none
         var secondEnd: Int      // y of last pixel of second-longest run, -1 if none
+        // Full per-column run dump (added 2026-04-07 follow-up to §11.5):
+        // every contiguous mask run in scan order, top-down. Lets us fit
+        // gradient-shape candidates (run-length-weighted Y-centroid,
+        // length-thresholded top-down scans, etc.) against existing logs
+        // without yet another instrumentation round. See
+        // detector_hypotheses.md §11.5.
+        var allRuns: [(start: Int, end: Int)]
     }
 
     private func columnStats(gx: Int, comp: Component) -> ColStats {
@@ -924,6 +931,7 @@ final class DetectionEngine {
         var topmostLen = 0
         var topmostStart = -1
         var topmostEnd = -1
+        var allRuns: [(start: Int, end: Int)] = []
         var curRun = 0
         var curRunStart = -1
         var totalPx = 0
@@ -933,7 +941,8 @@ final class DetectionEngine {
         var seenRun = false
 
         // Closes the currently open run (curRun > 0 implied) and folds it
-        // into the longest / second-longest / topmost trackers.
+        // into the longest / second-longest / topmost trackers, and into
+        // the full allRuns dump.
         func closeRun(endY: Int) {
             // Topmost run = the first run encountered scanning top-down.
             if topmostLen == 0 {
@@ -954,6 +963,7 @@ final class DetectionEngine {
                 secondStart = curRunStart
                 secondEnd = endY
             }
+            allRuns.append((start: curRunStart, end: endY))
         }
 
         for y in comp.minY...comp.maxY {
@@ -985,7 +995,8 @@ final class DetectionEngine {
             totalPx: totalPx, runCount: runCount, maxGap: maxGap,
             topmostMaskY: topmostMaskY,
             topmostLen: topmostLen, topmostStart: topmostStart, topmostEnd: topmostEnd,
-            secondLen: secondLen, secondStart: secondStart, secondEnd: secondEnd
+            secondLen: secondLen, secondStart: secondStart, secondEnd: secondEnd,
+            allRuns: allRuns
         )
     }
 
@@ -1026,6 +1037,16 @@ final class DetectionEngine {
                 detail += "/2nd=\(s.secondLen)@\(s.secondStart)..\(s.secondEnd)"
             } else {
                 detail += "/2nd=0"
+            }
+            // Full per-column run dump (top-down). Compact "Y1..Y2,Y3..Y4,..."
+            // notation. Empty string if the column had no mask. See
+            // detector_hypotheses.md §11.5 — used to fit candidate
+            // gradient-shape pickers against this run's frames.
+            if s.allRuns.isEmpty {
+                detail += "/all="
+            } else {
+                let runStrs = s.allRuns.map { "\($0.start)..\($0.end)" }
+                detail += "/all=" + runStrs.joined(separator: ",")
             }
         }
         print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")

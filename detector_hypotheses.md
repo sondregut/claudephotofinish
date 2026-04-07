@@ -912,10 +912,18 @@ fix for *that* is in §11.5.
 
 - `ColStats` / `columnStats` / `logGateDiagPrefix` in
   `DetectionEngine.swift:891-968` are extended to compute and log
-  per-column `topmostMaskY`, `topmostRun`, and `secondRun`. The
+  per-column `topmostMaskY`, `topmostRun`, `secondRun`, and a full
+  per-column run dump (every contiguous mask run, top-down). The
   existing `lng`/`tot`/`runs`/`maxGap` fields stay in place for
   backward compatibility with the Test A–G DIAG excerpts already
-  in the docs. The new fields are appended.
+  in the docs. The new fields are appended in this order:
+  `/tmY=` (topmost mask y), `/top=L@Y1..Y2` (topmost run),
+  `/2nd=L@Y1..Y2` (second-longest run), `/all=Y1..Y2,Y3..Y4,...`
+  (every run, top-down). The `/all=` field exists so that any
+  candidate gradient shape — including a true run-length-weighted
+  Y-centroid that needs every run, not just the top two — can be
+  fit against existing logs without yet another instrumentation
+  round.
 - This logging is only called from `logGateDiagPrefix`, which only
   runs when we were already emitting a DIAG line. Zero impact on
   the detection hot path. The picker itself — `analyzeGate` at
