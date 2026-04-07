@@ -835,3 +835,563 @@ fixed in this pass; logged for the future Y-row pass.
    (c) cyan dot Y visually wrong (= the known Y-picker bias).
 
 ---
+
+## Run 2026-04-07 Test F — upright + forward-lean finishes (no leg swipes)
+
+**Device / setup:** iPhone, back camera, tripod, gate column = center
+(x=90 in process coords). Auto-exposure with cap 4.00 ms, well-lit indoor
+(ISO range 270–870 across the run). `.hd1280x720` preset, `420v` pixel
+format, 30 fps locked.
+
+**Build:** identical algorithm and parameters to Test E (Run 2026-04-06 §
+Test A snapshot). **Zero detector code changed since 2026-04-06** — this
+run is a pure data-collection pass against the same binary that produced
+the Test F hypotheses doc (`detector_hypotheses.md`, dated 2026-04-06).
+
+**User-declared scenario plan:**
+- **Laps 1–13:** upright sprint crossings (regular running form).
+- **Laps 14, 15, 16:** forward-lean finishes (chest-over-line lean,
+  reduces vertical body extent in the visible blob).
+- **Lap 17:** upright (extra crossing after the lean set).
+- **No leg-swipe / hand-only crossings in this session.** The leg-fire
+  hypothesis from `detector_hypotheses.md` cannot be tested with this
+  data — leg-swipe runs will follow in a separate "Test G" session.
+
+Cold-start artifacts (already known, not lean-related):
+- `[GAP] 608ms gap before frame=32`
+- `[FRAME_DROP] 4 frames dropped since frame 32`
+- `[FRAME_DROP] 11 frames dropped since frame 33`
+
+The cold-start gap landed between crossing #1 and crossing #2 — those
+two crossings are 0.751 s apart in `[CROSSING]` time but the engine
+processed almost no frames in between because of the drop. This is the
+same `processFrame`-vs-capture-thread cold-start issue from prior runs
+and is being tracked separately.
+
+### Run: 17 crossings
+
+| # | time (s) | type | blob (W×H) | hR | wR | fill | detY | dir | interp dB/dA | frame |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 0.939 | upright | 129×136 | 0.43 | 0.72 | 0.31 | 274 | R→L | 1/12 | 30 |
+| 2 | 1.690 | upright | 107×206 | 0.64 | 0.59 | 0.35 | 193 | L→R | 24/16 | 35 |
+| 3 | 6.363 | upright | 127×203 | 0.63 | 0.71 | 0.38 | 165 | L→R | 18/6 | 175 |
+| 4 | 10.393 | upright | 95×246 | 0.77 | 0.53 | 0.29 | 286 | L→R | 7/4 | 296 |
+| 5 | 17.152 | upright | 98×231 | 0.72 | 0.54 | 0.30 | 275 | L→R | 5/9 | 499 |
+| 6 | 20.749 | upright | 104×251 | 0.78 | 0.58 | 0.42 | 186 | R→L | 2/6 | 607 |
+| 7 | 23.654 | upright | 112×249 | 0.78 | 0.62 | 0.33 | 236 | L→R | 3/5 | 694 |
+| 8 | 33.790 | upright | 127×264 | 0.82 | 0.71 | 0.41 | 270 | R→L | 7/11 | 998 |
+| 9 | 37.061 | upright | 126×281 | 0.88 | 0.70 | 0.35 | 124 | L→R | 0/0 | 1096 |
+| 10 | 42.131 | upright | 103×243 | 0.76 | 0.57 | 0.34 | 203 | R→L | 5/4 | 1248 |
+| 11 | 44.828 | upright | 159×255 | 0.80 | 0.88 | 0.32 | 240 | L→R | 4/5 | 1329 |
+| 12 | 48.405 | upright | 151×233 | 0.73 | 0.84 | 0.27 | 261 | R→L | 12/4 | 1436 |
+| 13 | 51.448 | upright | 49×152 | 0.47 | 0.27 | 0.28 | 200 | R→L | 9/0 | 1527 |
+| **14** | **55.462** | **lean fwd** | **46×166** | **0.52** | **0.26** | **0.29** | **283** | **R→L** | **4/6** | **1648** |
+| **15** | **58.280** | **lean fwd** | **133×227** | **0.71** | **0.74** | **0.25** | **247** | **R→L** | **33/3** | **1732** |
+| **16** | **61.761** | **lean fwd** | **117×232** | **0.73** | **0.65** | **0.27** | **166** | **R→L** | **4/8** | **1837** |
+| 17 | 68.308 | upright | 77×225 | 0.70 | 0.43 | 0.26 | 183 | L→R | 9/4 | 2033 |
+
+### USER_MARK ground-truth Δy (final mark per lap)
+
+Y is processing-buffer Y (180×320, 0 = top of image). **Δy = userY − detY**,
+so negative means **detector picked a Y *below* the user's torso mark**
+(deeper into the body, toward feet).
+
+| # | type | detY | userY | Δy | userX |
+|---|---|---|---|---|---|
+| 4  | upright  | 286 | 164 | **−122** | 87 |
+| 5  | upright  | 275 | 170 | **−105** | 77 |
+| 6  | upright  | 186 | 166 |   −20  | 92 |
+| 7  | upright  | 236 | 170 |  **−66**  | 88 |
+| 9  | upright  | 124 | 159 |  **+35**  | 87 |
+| 11 | upright  | 240 | 234 |    −6  | 82 |
+| 12 | upright  | 261 | 176 |  **−85**  | 92 |
+| 13 | upright  | 200 | 183 |   −17  | 95 |
+| **14** | **lean fwd** | **283** | **167** | **−116** | 108 |
+| **15** | **lean fwd** | **247** | **180** |  **−67** | 174 |
+| **16** | **lean fwd** | **166** | **161** |   **−5** |  90 |
+| 17 | upright  | 183 | 162 |   −21  | 77 |
+
+Laps 1, 2, 3, 8, 10 were not USER_MARK'd in this session.
+
+**Headline numbers:**
+- **11 of 12 marks have negative Δy** (detector picks Y *below* the
+  torso mark on every lap except #9).
+- Mean Δy ≈ **−47** (≈14.7% of 320-px frame height).
+- Worst three offenders are **−122, −116, −105** — more than a third
+  of the frame height between detector and user mark.
+- Lap **#9** is the only positive (Δy = +35) and corresponds to the
+  disjoint-range column pattern documented below.
+- Lap **#16** (a lean!) is **the most accurate crossing of the entire
+  session** at Δy = −5. Existence proof that leans are not inherently
+  broken — they fail only when the gate column happens to slice
+  through a foreleg/foot.
+
+### High-signal DETECT_DIAG excerpts
+
+#### Lap 4 (upright, Δy = −122) — clean longest-run-in-the-legs failure
+```
+[COMP] >>> #1 95x246 x=17..111 y=74..319 area=6784 gate=YES
+[DETECT] blob=95x246 hR=0.77 wR=0.53 fill=0.29 run=62 interp=7/4 dir=L>R
+   cands=1 area=6784 x=17..111 detY=286 frame=296 time=10.393
+[DETECT_DIAG] frame=296 blob=95x246 need=61 avg=62
+   cols=[ c88:lng=61@249..309/tot=164/runs=11/maxGap=36
+       >  c89:lng=68@249..316/tot=152/runs=8/maxGap=44
+       >  c90:lng=65@251..315/tot=132/runs=8/maxGap=80
+       >  c91:lng=54@266..319/tot=132/runs=9/maxGap=82
+          c92:lng=46@274..319/tot=132/runs=11/maxGap=85 ]
+```
+Blob spans `y=74..319` (a near-full-frame body). The longest run in
+*every* gate column lives in `y ≈ 249..319`, i.e. the lower third of
+the body. detY = midpoint of longest run = ~286. User marked the
+upper torso at 164. The gate column is slicing legs/feet, not torso,
+because the legs produced a denser/longer contiguous mask stripe than
+the torso did.
+
+#### Lap 9 (upright, Δy = +35) — disjoint-range artifact, real-body sighting
+```
+[COMP] >>> #0 126x281 x=7..132 y=39..319 area=12242 gate=YES
+[DETECT] blob=126x281 hR=0.88 wR=0.70 fill=0.35 run=89 interp=0/0 dir=L>R
+   cands=1 area=12242 x=7..132 detY=124 frame=1096 time=37.061
+[DETECT_DIAG] frame=1096 blob=126x281 need=70 avg=89
+   cols=[  c88:lng=146@140..285/tot=236/runs=5/maxGap=35
+           c89:lng=136@143..278/tot=229/runs=6/maxGap=38
+        >  c90:lng=155@145..299/tot=232/runs=3/maxGap=40
+        >  c91:lng=58@46..103/tot=200/runs=5/maxGap=44
+        >  c92:lng=56@47..102/tot=179/runs=7/maxGap=48 ]
+```
+**Confirms hypothesis #2 from `detector_hypotheses.md`** on a real body.
+Columns 88–90 had huge runs centered around y≈210 (torso/legs region);
+columns 91–92 had short runs at y≈75 (head/upper-torso region). These
+two y-zones are **disjoint** (mid-blob gap), and the sliding-window
+scoring averaged them. detY = 124 — a y-coordinate where *neither*
+column actually had its longest run. This is the exact failure mode
+predicted in `detector_hypotheses.md` §0 hypothesis #2 and §2.6, here
+seen on a jogging body for the first time, not just on hand swipes.
+
+#### Lap 14 (lean forward, Δy = −116) — lean-as-leg-fire
+```
+[COMP] >>> #0 46x166 x=74..119 y=154..319 area=2220 gate=YES
+[COMP]     #1 102x246 x=78..179 y=74..319 area=5754 gate=YES
+[DETECT] blob=46x166 hR=0.52 wR=0.26 fill=0.29 run=53 interp=4/6 dir=R>L
+   cands=1 area=2220 x=74..119 detY=283 frame=1648 time=55.462
+[DETECT_DIAG] frame=1648 blob=46x166 need=41 avg=53
+   cols=[ >c88:lng=59@261..319/tot=61/runs=3/maxGap=94
+       >  c89:lng=45@258..302/tot=61/runs=5/maxGap=91
+       >  c90:lng=55@254..308/tot=62/runs=4/maxGap=87
+          c91:lng=39@251..289/tot=62/runs=9/maxGap=83
+          c92:lng=33@249..281/tot=60/runs=9/maxGap=80 ]
+```
+Two gate-touching components: a small 46×166 blob and a larger 102×246
+blob. The picker chose the smaller one (`#0`) because of how
+`hasQualifyingSlice` scores rather than raw area — note `cands=1`, so
+the larger blob did not qualify on `analyzeGate`. All longest runs are
+in `y=249..319` again; detY = 283 is on the foreleg, user marked the
+chest at 167. The lean compressed the body vertically but the
+longest-vertical-run picker still landed on the leg, just like an
+upright leg-fire.
+
+#### Lap 15 (lean forward, Δy = −67) — long downward stripe in lean
+```
+[COMP] >>> #0 133x227 x=47..179 y=93..319 area=7651 gate=YES
+[DETECT] blob=133x227 hR=0.71 wR=0.74 fill=0.25 run=101 interp=33/3 dir=R>L
+   cands=1 area=7651 x=47..179 detY=247 frame=1732 time=58.280
+[DETECT_DIAG] frame=1732 blob=133x227 need=56 avg=101
+   cols=[ >c88:lng=122@198..319/tot=122/runs=1/maxGap=0
+       >  c89:lng=89@197..285/tot=121/runs=2/maxGap=2
+       >  c90:lng=92@195..286/tot=124/runs=2/maxGap=1
+          c91:lng=86@234..319/tot=125/runs=2/maxGap=2
+          c92:lng=88@232..319/tot=125/runs=2/maxGap=2 ]
+```
+Lean produced a single very long contiguous downward stripe (122 px
+in c88 — about 38% of the frame!) running from y=198 to y=319, i.e.
+chest-down-through-feet. Picker took the midpoint of that stripe,
+landing at detY=247 (mid-thigh region). User marked the top of the
+chest at 180. Note `interp=33/3` is wildly asymmetric — the leading
+edge had walked 33 columns past the gate at this row, suggesting the
+detection frame fired well after chest-cross.
+
+User's `userX = 174` for this lap is way off the gate band (gate is
+at column 90); the X mark is unreliable here. Δy is still meaningful
+because the picker math doesn't couple X and Y.
+
+#### Lap 16 (lean forward, Δy = −5) — the existence proof
+```
+[COMP] >>> #0 117x232 x=63..179 y=88..319 area=7442 gate=YES
+[DETECT] blob=117x232 hR=0.73 wR=0.65 fill=0.27 run=60 interp=4/8 dir=R>L
+   cands=1 area=7442 x=63..179 detY=166 frame=1837 time=61.761
+[DETECT_DIAG] frame=1837 blob=117x232 need=58 avg=60
+   cols=[ >c88:lng=55@138..192/tot=138/runs=8/maxGap=60
+       >  c89:lng=61@136..196/tot=142/runs=14/maxGap=53
+       >  c90:lng=66@136..201/tot=141/runs=8/maxGap=46
+          c91:lng=65@142..206/tot=143/runs=11/maxGap=40
+          c92:lng=70@140..209/tot=151/runs=11/maxGap=34 ]
+```
+Same lean form as #14 and #15 — but here the longest run in every gate
+column lives cleanly in the upper-torso band (`y ≈ 136..209`) with no
+strong leg run competing. detY = 166 sits 5 px below the user's mark
+of 161. **This is the most accurate crossing of the entire session,
+and it's a lean.** It is the existence proof that leans are not
+inherently broken: the failure is "which body part the gate column
+happens to slice at frame T", not "leans are detected wrong".
+
+### Observations / what this run actually tells us
+
+1. **The Y-row picker bias is now confirmed on real bodies**, not just
+   on the prior hand-swipe runs. 11 of 12 marks negative, mean −47.
+   Promotes hypothesis #1 from `detector_hypotheses.md` from
+   "predicted" to "observed bias direction".
+2. **The disjoint-range artifact (hypothesis #2) is also confirmed
+   on a real body** — see lap #9 above. First sighting outside hand
+   swipes.
+3. **The lean failure mode is the same Y-row picker bug surfaced
+   through different geometry.** Not "leans reduce vertical height
+   and break detection." It's "leans change which body part the gate
+   column slices at frame T, and the picker takes whichever stripe is
+   densest." Lap 14 (Δy=−116, leg-fire on lean) and lap 16 (Δy=−5,
+   torso column on lean) are the both-directions existence proofs.
+4. **Lean does NOT correlate with worse Δy in this run.** Mean lean
+   Δy = (−116 − 67 − 5) / 3 = **−63**. Mean upright Δy (excluding the
+   +35 outlier) = (−122 − 105 − 20 − 66 − 6 − 85 − 17 − 21) / 8 =
+   **−55**. Within sample noise. Variance, not bias direction, is
+   what differentiates the two scenarios in this run.
+5. **No leg-swipe data was collected** — leg-fire hypothesis remains
+   unconfirmed for this session. Track for the next test.
+
+### Action
+
+**No algorithm change.** The user has explicitly directed the
+investigation order: forward-lean failure mode first, leg-in-front-of-
+body second. The next physical test we need is a **parallel Photo
+Finish capture of forward leans**, so we have ground truth for whether
+PF detects at the chest (Δy ≈ 0) or also picks low. That single data
+point decides whether the Y-row picker is what we should fix at all,
+or whether PF picks low too and our problem is somewhere else
+entirely.
+
+See `detector_hypotheses.md` §10 for the updated hypothesis ranking
+that incorporates Test F evidence.
+
+---
+
+## Run 2026-04-07 Test G — front-cam lean variations, PF-anchored marks
+
+> **⚠️ USER_MARK SEMANTICS CHANGED FOR THIS RUN ⚠️**
+>
+> In Tests A–F the on-screen tap marked **body anatomy** (chest/torso),
+> i.e. the user's best guess at where the runner's chest crossed. In
+> **Test G the tap marks where Photo Finish places its dot on our lap
+> thumbnail** — i.e. the user opened PF and ours side-by-side and
+> tapped our thumbnail at the **same vertical position** PF chose on
+> the same physical crossing.
+>
+> Therefore **`USER_MARK Δy` in Test G means `our_detY − PF_dotY`, NOT
+> `our_detY − chest_truthY`**. **Do NOT pool Test G Δy values with
+> Tests A–F.** They are measured against different reference axes and
+> averaging them is meaningless. The success metric for Test G is "how
+> close did our picker land to PF's picker on the same blob," not "how
+> close did we land to anatomical truth."
+>
+> Per CLAUDE.md and the project memory `feedback_replicate_not_improve_pf.md`,
+> the goal is to **replicate** PF's behavior, not to be more
+> anatomically correct than PF.
+>
+> Per the user during this session, **PF times are NOT comparable**
+> ("the times wont be compareable so its unessary to do this, what
+> mattesr is my placement on the thumbnails"). The success metric for
+> the picker fix is now **Y-placement on the thumbnail**, not T.
+
+**Camera caveat:** This run was captured on the **front camera**. All
+prior runs (A–F) were back camera. Cross-test comparison with Test F
+is therefore not apples-to-apples — front-cam framing, FOV, and
+auto-exposure behavior differ.
+
+### Run setup
+
+- 11 gate crossings, single runner
+- Mixed lean variations (the user pre-labelled each crossing as
+  "more lean", "less lean", or "no lean")
+- Front camera, otherwise default detector params (the same binary
+  that produced the Test F run earlier today)
+- Of 11 crossings, 8 received PF-anchored taps; 3 (#6, #8, #10) were
+  not tapped, so we have only the lean-variation label for them
+- Crossing #1 was tapped twice — first tap (Δy=−74) was a fat-finger,
+  second tap (Δy=−76) is the correction. Use only the second.
+
+### Detector results — full 11-crossing run table
+
+All blobs gate=YES, all met heightFraction/widthFraction/run prefilters.
+
+| # | t (s) | dir | blob WxH | comp y range | area | run | fill | hR | wR | detY |
+|---|-------|-----|----------|--------------|------|-----|------|------|------|------|
+| 1 | 6.121 | L>R | 70×169 | 151..319 | 3092 | 49 | 0.26 | 0.53 | 0.39 | 256 |
+| 2 | 9.460 | L>R | 164×209 | 111..319 | 8595 | 86 | 0.25 | 0.65 | 0.91 | 264 |
+| 3 | 12.987 | L>R | 100×195 | 125..319 | 6291 | 65 | 0.32 | 0.61 | 0.56 | 239 |
+| 4 | 16.018 | L>R | 108×222 | 98..319 | 7645 | 64 | 0.32 | 0.69 | 0.60 | 183 |
+| 5 | 19.620 | R>L | 107×223 | 97..319 | 8162 | 71 | 0.34 | 0.70 | 0.59 | 182 |
+| 6 | 26.104 | R>L | 118×212 | 108..319 | 7998 | 53 | 0.32 | 0.66 | 0.66 | 175 |
+| 7 | 28.827 | L>R | 84×222 | 98..319 | 5583 | 59 | 0.30 | 0.69 | 0.47 | 225 |
+| 8 | 32.201 | R>L | 141×223 | 97..319 | 8099 | 65 | 0.26 | 0.70 | 0.78 | 197 |
+| 9 | 39.002 | L>R | 107×157 | 143..299 | 4390 | 54 | 0.26 | 0.49 | 0.59 | 269 |
+| 10 | 41.463 | L>R | 87×203 | 117..319 | 4543 | 58 | 0.26 | 0.63 | 0.48 | 181 |
+| 11 | 44.503 | R>L | 112×196 | 124..319 | 5948 | 50 | 0.27 | 0.61 | 0.62 | 294 |
+
+### USER_MARK Δy table — stratified by lean severity
+
+`Δy = our_detY − PF_dotY` (negative = our picker is **below** where PF
+placed its dot, i.e. lower in the frame / further into the legs).
+
+`% from blob top = (PF_dotY − comp.minY) / comp.height` (where PF
+landed within the blob, expressed as a fraction of blob height; 0% =
+top of blob, 100% = bottom of blob).
+
+`detY % from top` is the same fraction for our own picker, included
+to make the gap visible without arithmetic.
+
+| # | variation | detY | PF Y | **Δy** | PF % from top | detY % from top |
+|---|-----------|------|------|--------|---------------|-----------------|
+| 1 | more lean | 256 | 180 | **−76** | **17%** | 62% |
+| 2 | more lean | 264 | 186 | **−78** | **36%** | 73% |
+| 3 | more lean | 239 | 168 | **−71** | **22%** | 58% |
+| 9 | more lean | 269 | 183 | **−86** | **26%** | 80% |
+| 11 | more lean | 294 | 171 | **−123** | **24%** | 87% |
+| 4 | less lean | 183 | 175 | −8 | 35% | 38% |
+| 5 | less lean | 182 | 179 | −3 | 37% | 38% |
+| 7 | no lean | 225 | 219 | −6 | 55% | 57% |
+| 6 | less lean | (unmarked) | — | — | — | 32% |
+| 8 | no lean | (unmarked) | — | — | — | 45% |
+| 10 | less lean | (unmarked) | — | — | — | 32% |
+
+**The bimodal split is clean and lines up perfectly with lean
+severity, with zero overlap:**
+
+- **More lean (n=5):** Δy ∈ {−76, −78, −71, −86, −123}, mean ≈ **−87**.
+  Our detY % from top ranges 58–87% (lower-body band). PF % from top
+  ranges 17–36% (upper-body band).
+- **Less lean (n=2 marked):** Δy ∈ {−8, −3}, mean ≈ **−5.5**. Our
+  detY % from top ≈ 38%. PF % from top ≈ 35–37%. **Picker matches.**
+- **No lean (n=1 marked):** Δy = −6. Our detY % from top = 57%. PF
+  % from top = 55%. **Picker matches.**
+
+The 3 unmarked crossings (#6, #8, #10) have detY % from top in the
+32–45% band — consistent with the marked less/no-lean cluster, which
+strongly suggests they would also have shown small Δy if tapped.
+
+### High-signal DETECT_DIAG excerpts — the "more lean" cluster (lower-body picker landing)
+
+These are the 5 crossings where the picker dramatically misses PF.
+Note that across c88..c92 the longest run in every column sits in
+the lower portion of the blob. The picker is averaging midpoints of
+these runs and landing in the leg/lower-body band. Above each run is
+the PF dot Y for context.
+
+```
+#1  PF=180  comp y=151..319  blob 70x169
+[DETECT_DIAG] frame=185 blob=70x169 need=42 avg=49 cols=[
+  c88:lng=78@228..305/tot=93/runs=6/maxGap=60
+  c89:lng=75@229..303/tot=83/runs=5/maxGap=6
+  >c90:lng=67@230..296/tot=81/runs=5/maxGap=8
+  >c91:lng=45@232..276/tot=69/runs=10/maxGap=7
+  >c92:lng=36@234..269/tot=59/runs=9/maxGap=8 ]
+  → all longest-runs start at y≈228-234 (i.e. 77-83 pixels below
+    the blob's top edge at y=151). PF's dot is at y=180, only 29
+    pixels below the top edge. The picker never even sees the
+    upper-body pixels because the run that lives there is shorter
+    than the leg run in the same column.
+```
+
+```
+#2  PF=186  comp y=111..319  blob 164x209
+[DETECT_DIAG] frame=285 blob=164x209 need=52 avg=86 cols=[
+  c88:lng=67@230..296/tot=82/runs=9/maxGap=71
+  c89:lng=70@228..297/tot=93/runs=12/maxGap=53
+  >c90:lng=83@224..306/tot=97/runs=9/maxGap=46
+  >c91:lng=83@223..305/tot=99/runs=9/maxGap=45
+  >c92:lng=92@219..310/tot=108/runs=8/maxGap=31 ]
+  → maxGap of 31..71 means there *are* upper-body pixels (the
+    `tot` is up to 108 vs `lng` of 92), but they're broken up
+    into shorter runs separated by big gaps. The picker only
+    sees the longest run, which is the leg.
+```
+
+```
+#3  PF=168  comp y=125..319  blob 100x195
+[DETECT_DIAG] frame=391 blob=100x195 need=48 avg=65 cols=[
+  c88:lng=62@203..264/tot=122/runs=6/maxGap=17
+  c89:lng=63@204..266/tot=124/runs=6/maxGap=15
+  >c90:lng=65@205..269/tot=129/runs=6/maxGap=13
+  >c91:lng=65@207..271/tot=129/runs=7/maxGap=12
+  >c92:lng=66@208..273/tot=132/runs=7/maxGap=11 ]
+  → tot=122..132 vs lng=62..66 means the column is roughly half
+    upper-body, half lower-body, but the lower stripe is the
+    single longest contiguous run (and the upper is fragmented
+    into runs separated by ≤17px gaps). Picker locks onto leg.
+```
+
+```
+#9  PF=183  comp y=143..299  blob 107x157
+[DETECT_DIAG] frame=1171 blob=107x157 need=39 avg=54 cols=[
+  c88:lng=55@241..295/tot=80/runs=3/maxGap=13
+  c89:lng=53@243..295/tot=78/runs=4/maxGap=10
+  >c90:lng=52@244..295/tot=78/runs=4/maxGap=9
+  >c91:lng=52@244..295/tot=79/runs=6/maxGap=3
+  >c92:lng=59@238..296/tot=79/runs=4/maxGap=4 ]
+  → blob is short (157px) but the longest run starts at y≈238-244
+    (95-100px below the top edge at y=143). PF's dot at y=183 is
+    only 40px below the top edge, well above any longest run in
+    the gate columns.
+```
+
+```
+#11  PF=171  comp y=124..319  blob 112x196   ← worst case, Δy=−123
+[DETECT_DIAG] frame=1336 blob=112x196 need=49 avg=50 cols=[
+  c88:lng=43@277..319/tot=97/runs=6/maxGap=56
+  >c89:lng=44@276..319/tot=105/runs=9/maxGap=45
+  >c90:lng=53@267..319/tot=108/runs=9/maxGap=32
+  >c91:lng=53@267..319/tot=103/runs=6/maxGap=26
+  c92:lng=54@266..319/tot=97/runs=6/maxGap=26 ]
+  → longest runs start at y≈266-277 (142-153px below the top
+    edge at y=124) and end at y=319 — these are LITERALLY THE
+    FEET. The picker locks onto the feet. PF places its dot at
+    y=171, only 47px below the top edge. tot=97-108 vs lng=43-54
+    means roughly half the column is fragmented upper-body
+    pixels, but no single contiguous upper run beats the foot
+    run, so the picker never sees the body.
+```
+
+### High-signal DETECT_DIAG excerpts — the "less / no lean" cluster (picker matches PF)
+
+These are the marked crossings where Δy is in the noise (≤8px). The
+longest runs in c88..c92 happen to live at or near where PF's dot
+goes — i.e. the runner's torso *is* the longest contiguous vertical
+stripe in the gate columns when there is no significant lean.
+
+```
+#4  PF=175  comp y=98..319  blob 108x222
+[DETECT_DIAG] frame=482 blob=108x222 need=55 avg=64 cols=[
+  c88:lng=72@150..221/tot=125/runs=9/maxGap=75
+  c89:lng=70@150..219/tot=97/runs=6/maxGap=90
+  >c90:lng=69@149..217/tot=92/runs=6/maxGap=12
+  >c91:lng=62@154..215/tot=94/runs=9/maxGap=8
+  >c92:lng=62@151..212/tot=95/runs=8/maxGap=6 ]
+  → longest runs span y≈149..221 (i.e. 51..123 below the top
+    edge). PF dot at y=175 is 77 below the top edge — i.e.
+    smack inside the longest run. Midpoint ≈ 184, picker
+    averages to 183.
+```
+
+```
+#5  PF=179  comp y=97..319  blob 107x223
+[DETECT_DIAG] frame=590 blob=107x223 need=55 avg=71 cols=[
+  >c88:lng=60@155..214/tot=146/runs=6/maxGap=50
+  >c89:lng=64@153..216/tot=150/runs=8/maxGap=44
+  >c90:lng=90@131..220/tot=171/runs=10/maxGap=23
+  c91:lng=86@150..235/tot=177/runs=7/maxGap=17
+  c92:lng=86@150..235/tot=175/runs=7/maxGap=17 ]
+  → longest runs span y≈131..235 (mostly upper torso). Picker
+    averages midpoints near 182. PF places dot at y=179. Match.
+```
+
+```
+#7  PF=219  comp y=98..319  blob 84x222   ← "no lean" but PF lands at 55% from top
+[DETECT_DIAG] frame=866 blob=84x222 need=55 avg=59 cols=[
+  c88:lng=74@186..259/tot=84/runs=6/maxGap=15
+  c89:lng=59@188..246/tot=82/runs=9/maxGap=13
+  >c90:lng=57@192..248/tot=78/runs=8/maxGap=12
+  >c91:lng=63@196..258/tot=85/runs=13/maxGap=6
+  >c92:lng=59@201..259/tot=88/runs=13/maxGap=6 ]
+  → longest runs span y≈186..259 (lower-mid torso / waist
+    region). Picker averages to 225. PF places dot at y=219.
+    Match. Note that this crossing demonstrates that PF
+    is NOT just "upper-third of blob" — even on a no-lean
+    runner, PF's dot is 55% of the way down the blob here.
+    Whatever PF's rule is, it is not a flat fraction.
+```
+
+### Mechanism
+
+The picker in `analyzeGate` (`DetectionEngine.swift:789-882`) takes
+the **single longest contiguous vertical mask run** in each of the
+gate columns c88..c92 and averages those run midpoints across a
+sliding 3-column window. The y-row it returns (`detY`) is therefore
+"the y-center of the longest contiguous vertical stripe in the gate
+column."
+
+- In an **upright body**, the torso is the single tallest contiguous
+  vertical structure passing through the gate column. The picker
+  lands on the torso, the runner's chest happens to be inside that
+  stripe, and PF's dot also lands inside that stripe → Δy ≈ 0.
+
+- In a **forward-leaning body**, the torso is rotated forward in
+  the frame. The gate column no longer slices the torso as a single
+  tall contiguous run — the torso pixels in the gate column become
+  fragmented into shorter runs, separated by gaps where the gate
+  column passes between an arm and a chest, or through a gap caused
+  by the forward-rotated shoulder. Meanwhile the **legs are still
+  vertical** in the gate column (feet + lower leg form one
+  uninterrupted stripe from the body down to the bottom edge of the
+  blob). The longest run in the gate column flips from "torso" to
+  "leg," and the picker midpoint moves from the chest band down to
+  the leg band. PF, empirically, continues to place its dot in the
+  upper portion of the blob regardless of lean severity. So PF's
+  picker is NOT "longest vertical run in gate columns."
+
+This is the cleanest mechanistic confirmation we have for hypothesis
+#1 to date: a monotonic relationship between lean severity and
+picker error, with a clear, frame-by-frame visible cause (the gap
+counts in the DETECT_DIAG output show exactly where the torso run
+gets broken).
+
+### Observations
+
+1. **Δy correlates one-to-one with lean severity in this run.** Zero
+   overlap between the more-lean cluster and the less/no-lean
+   cluster. This is not noise — it is a systematic, lean-driven
+   picker failure.
+2. **PF does not have this bias.** Tests A–F speculated that PF might
+   share the same low-bias on leans (in which case our detector would
+   be "right" relative to PF and we shouldn't change anything). Test
+   G falsifies that: PF visibly stays in the upper-body band on lean
+   crossings while we drop to the legs. This is a divergence we must
+   close, not a shared artifact.
+3. **PF's rule is NOT "flat fraction of blob height."** Crossing #7
+   ("no lean") puts PF at 55% from top, while crossings #1–3, #9, #11
+   ("more lean") put PF at 17–36% from top. Whatever PF does, it
+   adapts to body posture. A simple `detY = comp.minY + 0.25 * height`
+   replacement would not match it.
+4. **Front-camera caveat.** All prior tests were back camera. This
+   run is front camera. Don't generalize Test G distribution
+   characteristics (frame counts, gap sizes, motion-area
+   distribution) to back-cam runs without re-checking.
+5. **The current DETECT_DIAG output is insufficient to design the
+   fix.** We log the single longest run per column (`lng=L@Y1..Y2`)
+   but not the topmost run, the second-longest run, or the topmost
+   mask pixel in the column. Without those, we can't read what a
+   "topmost-qualifying-run" picker would have chosen on the same
+   frames, so we can't validate a candidate replacement rule
+   against existing data.
+
+### Action
+
+**Doc-and-diagnostic-only this session.** No `analyzeGate` change.
+Specifically:
+
+1. This Test G section + a §11 follow-up in `detector_hypotheses.md`
+   that promotes hypothesis #1 with the lean-severity correlation
+   and flags the mechanism.
+2. **Non-behavioral** expansion of `[DETECT_DIAG]` logging in
+   `DetectionEngine.swift` — add per-column topmost mask y, second-
+   longest run, and topmost run fields to `ColStats` /
+   `columnStats` / `logGateDiagPrefix`. This does not touch the
+   picker; it only gives us the data we need to design the
+   picker fix in the next physical test.
+3. **Next physical test:** repeat the lean-variation protocol on
+   front cam, ≥8 "more lean" crossings (the failing cluster), every
+   crossing tapped at PF's dot position, with the user pre-labelling
+   each crossing's lean severity. Then compare candidate picker
+   rules (topmost qualifying run; weighted Y-centroid; etc.) against
+   the new expanded-DIAG data and pick the one that best matches
+   PF across all severities.
+
+See `detector_hypotheses.md` §11 for the updated hypothesis ranking.
+
+---
