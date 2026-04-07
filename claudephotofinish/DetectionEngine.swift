@@ -70,8 +70,8 @@ final class DetectionEngine {
     private let diffThreshold: UInt8    = 15
     private let heightFraction: Float   = 0.33
     private let widthFraction:  Float   = 0.08
-    private let localSupportFraction: Float = 0.25
-    private let minFillRatio: Float = 0.25       // reject sparse blobs (hand swipes)
+    private let localSupportFraction: Float = 0.15
+    private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
     private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
@@ -87,6 +87,7 @@ final class DetectionEngine {
     private var lastDetectionElapsed: TimeInterval?
     private var lastDetectionRealElapsed: TimeInterval?   // actual frame time, for cooldown
     private let cooldown: TimeInterval = 0.5
+    private var gateOccupied = false   // after detection, wait for gate to clear before re-arming
 
     // Logging
     private var lastRejectReason = ""
@@ -110,6 +111,7 @@ final class DetectionEngine {
         sessionStart = timestamp
         lastDetectionElapsed = nil
         lastDetectionRealElapsed = nil
+        gateOccupied = false
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
@@ -126,6 +128,7 @@ final class DetectionEngine {
         sessionStart = nil
         lastDetectionElapsed = nil
         lastDetectionRealElapsed = nil
+        gateOccupied = false
         hasPrevious = false
         frameIndex = 0
         lastFullW = 0
@@ -270,7 +273,21 @@ final class DetectionEngine {
             }
         }
 
-        guard let candidate = best else { return nil }
+        guard let candidate = best else {
+            // No qualifying blob at gate — clear the occupied flag so next real
+            // crossing can fire immediately once the gate is clean.
+            if gateOccupied { gateOccupied = false }
+            return nil
+        }
+
+        // Gate-clear guard: after a detection, require at least one frame where
+        // no qualifying blob occupies the gate before re-arming. This prevents
+        // double-triggers when frame drops cause the time-based cooldown to expire
+        // while the same person is still crossing.
+        if gateOccupied {
+            logReject("gate_occupied")
+            return nil
+        }
 
         // §12.5 frame-Y bias cap (hypothesis B): clamp picker output to top N% of frame.
         // If the picker lands below the cap (deeper into legs on lean crossings), snap up
@@ -358,6 +375,7 @@ final class DetectionEngine {
 
         lastDetectionElapsed = crossingTime
         lastDetectionRealElapsed = elapsed
+        gateOccupied = true
         lastRejectReason = ""
 
         let c = candidate.comp
