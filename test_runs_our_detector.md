@@ -835,3 +835,103 @@ fixed in this pass; logged for the future Y-row pass.
    (c) cyan dot Y visually wrong (= the known Y-picker bias).
 
 ---
+
+## Run 2026-04-07 Test F — exaggerated leg crossings (real body)
+
+**Device / setup:** iPhone, 30 fps, hd1280x720, process 180×320, gate
+column 90, stabilization off, Center Stage off, scaleX=scaleY=4. Front
+camera (per `[CAMERA] switched to front` in the session log preceding
+this test).
+
+**Build:** commit `2c08692` ("Snapshot in-progress detector work and
+add framerate feasibility analysis"). No code changes in this run —
+this is raw evidence captured before the leadY instrumentation pass.
+
+**Methodology:** real-body crossings with **deliberately exaggerated
+leg/arm scissoring** — runner spread arms and crossed legs more than
+in prior runs to see how blob spread affects the Y picker. 8 crossings
+detected, all 8 user-marked.
+
+### DETECT lines (same session, third detection run in the log)
+
+```
+[DETECT] blob=180x320 hR=1.00 wR=1.00 fill=0.51 run=137 interp=90/2 dir=L>R cands=1 area=29261 x=0..179 detY=139 frame=48 time=1.569
+[DETECT] blob=123x220 hR=0.69 wR=0.68 fill=0.27 run=57  interp=3/5  dir=R>L cands=1 area=7294  x=57..179 detY=182 frame=452 time=15.019
+[DETECT] blob=111x270 hR=0.84 wR=0.62 fill=0.32 run=111 interp=0/9  dir=R>L cands=1 area=9571  x=60..170 detY=235 frame=465 time=15.440
+[DETECT] blob=128x276 hR=0.86 wR=0.71 fill=0.31 run=87  interp=14/2 dir=L>R cands=1 area=10809 x=0..127  detY=232 frame=567 time=18.870
+[DETECT] blob=82x149  hR=0.47 wR=0.46 fill=0.26 run=58  interp=12/3 dir=L>R cands=1 area=3174  x=11..92  detY=166 frame=665 time=22.134
+[DETECT] blob=131x275 hR=0.86 wR=0.73 fill=0.26 run=69  interp=10/4 dir=L>R cands=1 area=9298  x=0..130  detY=229 frame=765 time=25.466
+[DETECT] blob=116x229 hR=0.72 wR=0.64 fill=0.26 run=71  interp=2/12 dir=L>R cands=1 area=6909  x=14..129 detY=159 frame=856 time=28.481
+[DETECT] blob=169x263 hR=0.82 wR=0.94 fill=0.25 run=90  interp=0/9  dir=R>L cands=1 area=11135 x=11..179 detY=180 frame=1030 time=34.277
+[DETECT] blob=140x268 hR=0.84 wR=0.78 fill=0.28 run=97  interp=1/11 dir=L>R cands=1 area=10688 x=0..139  detY=193 frame=1114 time=37.080
+[DETECT] blob=148x262 hR=0.82 wR=0.82 fill=0.27 run=71  interp=10/3 dir=R>L cands=1 area=10648 x=32..179 detY=198 frame=1201 time=40.004
+```
+
+(The first DETECT, frame=48 detY=139, is a startup whole-frame trigger
+on the runner walking into view — `blob=180x320`, `hR=1.00 wR=1.00`,
+`run=137`. It is not one of the 8 user-marked crossings; user marks
+start at #1 = the second DETECT row above, time=15.440.)
+
+### USER_MARK lines
+
+```
+[USER_MARK] #1 detY=235 userY=172 Δy=-63 userX=130 time=15.440
+[USER_MARK] #2 detY=232 userY=145 Δy=-87 userX=32  time=18.870
+[USER_MARK] #3 detY=166 userY=171 Δy=+5  userX=92  time=22.134
+[USER_MARK] #4 detY=229 userY=152 Δy=-77 userX=32  time=25.466
+[USER_MARK] #5 detY=159 userY=147 Δy=-12 userX=128 time=28.481
+[USER_MARK] #6 detY=180 userY=130 Δy=-50 userX=119 time=34.277
+[USER_MARK] #7 detY=193 userY=141 Δy=-52 userX=53  time=37.080
+[USER_MARK] #8 detY=198 userY=182 Δy=-16 userX=141 time=40.004
+```
+
+### Observations
+
+1. **Δy cluster: 7/8 negative (detY below userY in image), mean ≈ −44,
+   range −87..+5.** Worse than Test B's hand-swipe cluster (−37..−94)
+   in mean magnitude on a *real body*. Same direction, same root cause.
+2. **Same root cause as Test B §2** — detY is the midpoint of the
+   longest contiguous vertical run at the gate column. Exaggerated leg
+   crossings spread the densest mask region downward (legs scissoring
+   through the gate column add mask pixels in the lower half of the
+   blob), pulling the midpoint further below the torso/chest where the
+   user marks. This is *not* a new bug — it is the known
+   "densest-stripe Y picker" bias amplified by deliberate motion shape.
+3. **Crossing #3 is the exception that proves the rule.** It is the
+   only Δy ≈ 0 (+5). Looking at its DETECT_DIAG:
+   `c92:lng=73@125..197/tot=76/runs=3/maxGap=34/tmY=125/top=73@125..197/2nd=2`
+   — the winning column's `top` run (73 px) is essentially the entire
+   `tot` (76 px). I.e. for crossing #3 the longest vertical run *is*
+   the leading edge — there is no separate "densest stripe" for the
+   midpoint to drift toward — and unsurprisingly that is the only
+   crossing where detY tracks userY. Every other DETECT_DIAG in this
+   run has `top` ≪ `tot` and Δy goes negative.
+4. **No close-miss GATE_DIAGs at the gate column itself for the 8
+   real crossings** — the rejects logged before each DETECT are all
+   `fill_ratio`, `local_support`, or `no_gate_intersection` on
+   approach frames, not bad-Y rejects. The Y picker is only wrong
+   *after* a detection passes; it is not causing missed detections in
+   this run.
+5. **No frame drops on the actual crossings.** One `[GAP] 687ms gap
+   before frame=155` and `[FRAME_DROP] 19 frames` shows up at the
+   start (the spurious whole-frame DETECT at frame=48 from a previous
+   short session, before this user re-armed the timer); the 8
+   user-marked crossings themselves all have clean per-frame logs
+   around them.
+
+### Action
+
+**No selection-rule change.** Per the "replicate PF, don't fix PF"
+guidance and the open question from Test B — we still have not
+collected a leading-edge Y candidate alongside detY, so we cannot say
+whether a different rule would actually match either userY *or* PF
+behavior on the same physical setup.
+
+Implemented in this pass (commit follows): add a `leadingEdgeY` field
+to `GateAnalysis` and a `leadY=` column to `[DETECT]` — purely logged,
+not used for crossing time. The next on-device run with the same
+exaggerated-leg-crossing methodology should produce per-crossing pairs
+of (detY, leadY, userY), and the resulting Δy table will tell us
+whether a leading-edge selection rule would close this gap.
+
+---

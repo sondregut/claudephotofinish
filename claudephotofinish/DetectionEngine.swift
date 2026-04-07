@@ -36,6 +36,12 @@ private struct Component {
 private struct GateAnalysis {
     var hasQualifyingSlice: Bool
     var detectionY: Int
+    // Topmost Y of the winning window's leading-edge run — instrumentation only,
+    // not used for crossing time. See test_runs_our_detector.md Run 2026-04-07
+    // Test F. Compared against USER_MARK userY to evaluate whether a
+    // leading-edge selection rule would track user marks better than the
+    // current densest-stripe midpoint.
+    var leadingEdgeY: Int
     var maxVerticalRun: Int
     // Start index (into the columns array) of the 3-column sliding window that
     // produced the winning score. -1 when no window was scored.
@@ -228,7 +234,7 @@ final class DetectionEngine {
         let gMin = max(gateColumn - gateBandHalf, 0)
         let gMax = min(gateColumn + gateBandHalf, W - 1)
 
-        var best: (comp: Component, detY: Int, run: Int, winStart: Int)?
+        var best: (comp: Component, detY: Int, leadY: Int, run: Int, winStart: Int)?
         var candidateCount = 0
         let frameAbsMin = Int(Float(H) * minGateHeightFraction)
 
@@ -259,7 +265,7 @@ final class DetectionEngine {
                 if analysis.hasQualifyingSlice {
                     candidateCount += 1
                     if best == nil || comp.area > best!.comp.area {
-                        best = (comp, analysis.detectionY, analysis.maxVerticalRun, analysis.winWindowStart)
+                        best = (comp, analysis.detectionY, analysis.leadingEdgeY, analysis.maxVerticalRun, analysis.winWindowStart)
                     }
                 } else {
                     let need = max(3, Int(Float(comp.height) * localSupportFraction), frameAbsMin)
@@ -364,8 +370,8 @@ final class DetectionEngine {
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, frameIndex, crossingTime, expMs, isoVal))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d leadY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f",
+                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, candidate.detY, candidate.leadY, frameIndex, crossingTime, expMs, isoVal))
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
@@ -797,25 +803,32 @@ final class DetectionEngine {
 
         var colRuns = [Int](repeating: 0, count: columns.count)
         var colMids = [Int](repeating: 0, count: columns.count)
+        var colTops = [Int](repeating: 0, count: columns.count) // top Y of each column's longest run
 
         for (ci, gx) in columns.enumerated() {
             var runStart = -1
             var runLen   = 0
             var best     = 0
             var bestMid  = 0
+            var bestTop  = 0
 
             for y in comp.minY...comp.maxY {
                 if maskBuf[y * W + gx] != 0 {
                     if runStart < 0 { runStart = y }
                     runLen += 1
                 } else {
-                    if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
+                    if runLen > best {
+                        best = runLen; bestMid = runStart + runLen / 2; bestTop = runStart
+                    }
                     runStart = -1; runLen = 0
                 }
             }
-            if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
+            if runLen > best {
+                best = runLen; bestMid = runStart + runLen / 2; bestTop = runStart
+            }
             colRuns[ci] = best
             colMids[ci] = bestMid
+            colTops[ci] = bestTop
         }
 
         // Determine scan direction from leading edge
@@ -861,6 +874,8 @@ final class DetectionEngine {
                 return GateAnalysis(
                     hasQualifyingSlice: true,
                     detectionY: sumMid / sw,
+                    leadingEdgeY: leadingEdgeY(colRuns: colRuns, colTops: colTops,
+                                                wi: wi, sw: sw, minSupport: minSupport),
                     maxVerticalRun: avgRun,
                     winWindowStart: wi
                 )
@@ -876,9 +891,28 @@ final class DetectionEngine {
         return GateAnalysis(
             hasQualifyingSlice: false,
             detectionY: overallBestMid,
+            leadingEdgeY: leadingEdgeY(colRuns: colRuns, colTops: colTops,
+                                        wi: overallBestWi, sw: sw, minSupport: minSupport),
             maxVerticalRun: overallBestAvg,
             winWindowStart: overallBestWi
         )
+    }
+
+    /// Topmost Y across the winning window's columns whose longest run meets
+    /// `minSupport`. Falls back to topmost across all window columns if none
+    /// individually qualify (which is normal — the window passes on average).
+    private func leadingEdgeY(colRuns: [Int], colTops: [Int], wi: Int, sw: Int,
+                              minSupport: Int) -> Int {
+        guard wi >= 0, wi + sw <= colRuns.count else { return 0 }
+        var qualMin = Int.max
+        var anyMin = Int.max
+        for j in wi..<(wi + sw) {
+            let top = colTops[j]
+            if top < anyMin { anyMin = top }
+            if colRuns[j] >= minSupport && top < qualMin { qualMin = top }
+        }
+        if qualMin != Int.max { return qualMin }
+        return anyMin == Int.max ? 0 : anyMin
     }
 
     // MARK: - Diagnostic: per-column gate stats
