@@ -70,14 +70,14 @@ final class DetectionEngine {
     private let diffThreshold: UInt8    = 15
     private let heightFraction: Float   = 0.33
     private let widthFraction:  Float   = 0.08
-    private let localSupportFraction: Float = 0.15
+    // Reverted 2026-04-07 from 0.15 → 0.25 after the post-Test-N cross-tab
+    // in test_runs_our_detector.md showed that 5 of 7 Test N elbow leakers
+    // have run/h < 25% while every Tests F/G/H body crossing has run/h ≥ 25%.
+    // The 0.15 value (commit 8003aca "Lower detection thresholds for earlier
+    // firing") was opening the leak path for most elbow swipes.
+    private let localSupportFraction: Float = 0.25
     private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
-    // Hand swipe discriminator (2026-04-07): bodies have h/w 1.51–3.57 across
-    // 12 body crossings in Test L; hand swipes have h/w 0.83–2.01 across 45
-    // crossings in Tests L+M. Threshold 1.5 passes all bodies, rejects 84% of
-    // hand swipes. Tunable via Camera Tuning panel.
-    var minHeightWidthRatio: Float = 1.5
     private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
@@ -266,17 +266,6 @@ final class DetectionEngine {
                 logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
                 continue
             }
-            // Hand swipe discriminator: reject blobs that aren't tall enough
-            // relative to width. Bodies are always taller than wide; arm
-            // sweeps produce squarish or wide blobs.
-            if Float(comp.height) < minHeightWidthRatio * Float(comp.width) {
-                logReject("hw_ratio",
-                          detail: String(format: "h=%d w=%d ratio=%.2f min=%.2f",
-                                         comp.height, comp.width,
-                                         Float(comp.height) / Float(comp.width),
-                                         minHeightWidthRatio))
-                continue
-            }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
                 logReject("no_gate_intersection")
                 continue
@@ -418,14 +407,18 @@ final class DetectionEngine {
 
         let fR = Float(c.area) / Float(c.width * c.height)
         let dir = movingLeftToRight ? "L>R" : "R>L"
+        // Horizontal mask width at detY — physical thickness of the object as it
+        // crosses the gate. Theorized discriminator between torso (~30-60px) and
+        // elbow/arm (~10-20px). See test_runs_our_detector.md Test N.
+        let hRun = runRightX - runLeftX + 1
         // Shutter + ISO on the frame that triggered the detection. These drive
         // motion-blur width at the leading edge and are the primary suspects for
         // the "detY lands on the densest stripe, not the leading edge" bias —
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d",
-                     c.width, c.height, hR, wR, fR, candidate.run, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection))
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d",
+                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection))
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }

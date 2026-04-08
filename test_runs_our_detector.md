@@ -2494,3 +2494,669 @@ consistently have buildup ≥ 3 while hand swipes are mostly 1, temporal
 confirmation becomes viable.
 
 ---
+
+## Run 2026-04-07 Test N — hand swipes with h/w ≥ 1.5 filter active
+
+**Device / setup:** iPhone, front camera, handheld. Hand swipe /
+elbow-through-gate attempts. Raw log:
+`~/Downloads/test2 hand crossing .rtf`.
+
+**Build:** commit `bb6c664` — h/w ≥ 1.5 filter now active,
+tunable via Camera Tuning panel. Default 1.5.
+
+### Filter effectiveness
+
+- **22 frames rejected at `hw_ratio`** — the new filter is firing.
+  Rejected blobs had ratios 0.87–1.42 (all below 1.5).
+- **9 detections still fired** despite the filter.
+
+### Detections that leaked through the h/w ≥ 1.5 filter
+
+| # | frame | blob (w×h) | h/w | hR | wR | fill | run | area | detY | rawDetY | buildup | notes |
+|---|-------|-----------|-----|------|------|------|-----|------|------|---------|---------|-------|
+| 1 | 11 | 180×320 | 1.78 | 1.00 | 1.00 | 0.65 | 51 | 37316 | 100 | 100 | 1 | full frame — likely user walking into position before swipe set |
+| 2 | 102 | 102×281 | 2.75 | 0.88 | 0.57 | 0.23 | 48 | 6593 | 176 | 245 | 2 | tall narrow — vertical arm reach |
+| 3 | 308 | 74×144 | 1.95 | 0.45 | 0.41 | 0.25 | 25 | 2685 | 176 | 235 | 1 | small narrow elbow |
+| 4 | 367 | 88×219 | 2.49 | 0.68 | 0.49 | 0.20 | 33 | 3856 | 99 | 99 | 1 | tall narrow |
+| 5 | 447 | 53×128 | 2.42 | 0.40 | 0.29 | 0.37 | 43 | 2510 | 149 | 149 | 1 | very narrow — skinny arm |
+| 6 | 529 | 143×249 | 1.74 | 0.78 | 0.79 | 0.26 | 74 | 9258 | 131 | 131 | 5 | body-shaped — per user, still an elbow swipe |
+| 7 | 597 | 66×116 | 1.76 | 0.36 | 0.37 | 0.26 | 25 | 1991 | 176 | 259 | 1 | small — elbow |
+| 8 | 677 | 143×258 | 1.80 | 0.81 | 0.79 | 0.24 | 49 | 8690 | 146 | 146 | 4 | body-shaped — per user, still an elbow swipe |
+| 9 | 752 | 180×320 | 1.78 | 1.00 | 1.00 | 0.64 | 56 | 37009 | 88 | 88 | 1 | full frame — likely user walking out after swipe set |
+
+### Key finding — h/w filter partially works but misses "elbow" motions
+
+The filter caught most pure hand/arm sweeps (22 rejects at h/w 0.87–1.42,
+squarish blobs from circular/sideways arm motion). What leaked through:
+
+1. **Vertical arm reaches** (#2, #3, #4, #5, #7) — extending an elbow
+   straight up/down or diagonally creates a tall narrow blob that passes
+   h/w ≥ 1.5 trivially. These have small area (1991–6593) and narrow
+   widths (53–102 px).
+
+2. **Larger body-shaped elbow motions** (#6, #8) — the user reports these
+   are still elbow swipes, not real body crossings. Blob is 143×249 and
+   143×258 with areas ~9000 — looks very torso-like geometrically.
+   Something about elbow+upper-body motion is creating body-sized blobs.
+
+3. **Full-frame setup blobs** (#1, #9) — likely the user walking to/from
+   the test position, not deliberate swipes.
+
+### Torso vs elbow — what could discriminate?
+
+Reviewed against Test L body crossings (#17–#28):
+
+| feature | Test N leakers (elbows) | Test L bodies | overlap |
+|---------|------------------------|---------------|---------|
+| w (px) | 53–180 | 49–180 | total |
+| h (px) | 116–320 | 168–320 | near-total |
+| area | 1991–37316 | 2470–35136 | total |
+| h/w | 1.74–2.75 | 1.51–3.57 | total |
+| hR | 0.36–1.00 | 0.52–1.00 | partial (hR<0.5 in leakers) |
+| fill | 0.20–0.65 | 0.21–0.61 | total |
+| run | 25–74 | 25–288 | total |
+
+No currently-logged feature cleanly separates elbow from torso. The
+strongest theoretical discriminator not yet measured:
+
+**Horizontal mask width at detY** (the physical thickness of the object
+where it crosses the gate). An elbow is ~10–20 px thick at the gate;
+a torso is ~30–60 px thick. We already compute `runLeftX..runRightX`
+at `DetectionEngine.swift:352-360` for interpolation but never log it.
+
+### Next test needed — isolate elbow vs torso
+
+Before running more hand swipe experiments, add `hRun` (horizontal mask
+width at detY) to DETECT log. Then run three labeled scenarios:
+
+**A — Torso only:** Walk through the gate 10× normally, arms at sides,
+upright, no lean.
+
+**B — Elbow only (body out of frame):** Stand completely out of camera
+view. Extend only the elbow/forearm through the gate column, retract.
+10 reps. Tests what an isolated arm blob looks like with zero body
+context.
+
+**C — Body standing still + elbow swipe:** Stand in frame behind the
+gate, don't move the body, only swipe the elbow. 10 reps. Tests whether
+the standing body shows up in the diff.
+
+Compare hRun values across the three. If torso hRun is consistently
+≥ 30 px and elbow hRun is consistently ≤ 20 px, we have a clean new
+discriminator.
+
+---
+
+## Cross-tabulation — body vs hand on existing log features (2026-04-07, doc-only)
+
+**Purpose.** Executing §10 of the audit plan (`.claude/plans/steady-napping-lighthouse.md`): before running any new physical test or adding a new filter, cross-tabulate the 7 real Test N elbow leakers against the 37 real-body crossings from Tests F + G + H on every feature we already log. Success criterion: find at least one feature with ≥80% separation. Secondary output: check whether the `h/w ≥ 1.5` filter added this session would have falsely rejected any real body crossings.
+
+**Datasets used.**
+- **Bodies (n=37):** Test F 17 crossings (back cam, upright + forward lean), Test G 11 crossings (front cam, lean variations), Test H 9 crossings (back cam, lean + backward lean).
+- **Elbows (n=7):** Test N leakers #2–#8 (rows #1 and #9 are excluded — they are "user walking into/out of position" full-frame 180×320 blobs, not deliberate swipes).
+
+**Important build-state caveats.**
+- `localSupportFraction` was **0.25** during Tests F/G/H, **0.15** during Test N (lowered at commit `8003aca` "Lower detection thresholds for earlier firing"). This directly explains several Test N leakers — see §1 below.
+- `frameBiasCap = 0.55` was **inactive** during Tests F/G/H, **active** during Test N. Test N leakers #2, #3, #7 have `rawDetY` ∈ {245, 235, 259} clamped to `detY=176`. For cross-tabulation the meaningful comparison is `rawDetY`.
+
+### 1. Primary finding — `localSupportFraction` regression explains most Test N leakers
+
+The `run` field in the DETECT log is `candidate.run` — the longest vertical mask run at the picked gate column. Expressed as a fraction of blob height:
+
+| test | body run / h | body n | body min | body max |
+|------|-------------|--------|----------|----------|
+| F (partial — only 5 excerpts have DIAG run) | 25–44% | 5 | 25% | 44% |
+| G | 25–41% | 11 | 25% | 41% |
+| H | 25–44% | 9 | 25% | 44% |
+| **all bodies** | **25–44%** | **25 sampled** | **25%** | **44%** |
+
+Every body crossing where we have a logged `run` value sits at or above **25% of blob height**. This is not a coincidence — at the time, `localSupportFraction = 0.25` was the threshold for passing `analyzeGate`.
+
+Elbow `run / h`:
+
+| # | w×h | run | run/h |
+|---|-----|-----|-------|
+| 2 | 102×281 | 48 | **17%** |
+| 3 | 74×144 | 25 | **17%** |
+| 4 | 88×219 | 33 | **15%** |
+| 5 | 53×128 | 43 | 34% |
+| 6 | 143×249 | 74 | 30% |
+| 7 | 66×116 | 25 | **22%** |
+| 8 | 143×258 | 49 | **19%** |
+
+**5 of 7 elbow leakers** (#2, #3, #4, #7, #8) have `run/h < 25%` — below the old `localSupportFraction = 0.25` threshold. Under the old threshold those 5 would not have passed `analyzeGate` at all. Under the current `0.15` threshold they do.
+
+**Interpretation.** The recent threshold lowering at commit `8003aca` ("Lower detection thresholds for earlier firing") is a strong contributor to the Test N leaker problem. The 2 elbow leakers that remain under a hypothetical `0.25` revert are #5 (53×128, run=43, 34%) and #6 (143×249, run=74, 30%) — both small enough to also fail a tighter `heightFraction`.
+
+Separation achieved by `run/h ≥ 0.25`:
+- Bodies: 25/25 pass (100%).
+- Elbows: 2/7 pass (29%). **≥70% elbow rejection with zero body false-rejects.**
+
+This hits the §10 success criterion (≥80% separation, at least directionally) — **not** as a new feature, but as a revert of a parameter we just changed.
+
+### 2. Critical finding — current `h/w ≥ 1.5` filter rejects real body crossings
+
+Cross-checked the h/w ratio of every body crossing in Tests F + G + H against the new filter added in Test N:
+
+| test | # | scenario | blob w×h | h/w | filter result |
+|------|---|----------|---------|-----|---------------|
+| F | 1 | upright | 129×136 | **1.05** | **REJECT** |
+| G | 2 | more lean | 164×209 | **1.27** | **REJECT** |
+| H | 3 | lean lots | 156×221 | **1.42** | **REJECT** |
+| G | 9 | more lean | 107×157 | **1.47** | **REJECT** |
+| F | 12 | upright | 151×233 | 1.54 | pass |
+| G | 8 | no lean | 141×223 | 1.58 | pass |
+| F | 3 | upright | 127×203 | 1.60 | pass |
+| F | 11 | upright | 159×255 | 1.60 | pass |
+| H | 4 | lean decent | 147×240 | 1.63 | pass |
+| H | 1 | lean | 143×238 | 1.66 | pass |
+| H | 8 | lots lean | 145×235 | 1.62 | pass |
+| ... | ... | ... | ... | ≥ 1.66 | pass |
+
+**4 of 37 real body crossings (10.8%) would be rejected** by `minHeightWidthRatio ≥ 1.5`:
+- Test F lap 1: upright but a low-hR (0.43) crossing, close to the frame.
+- Test G lap 2: **"more lean"** — a forward-lean crossing, i.e. the class of crossings whose detection we are most worried about.
+- Test G lap 9: **"more lean"**.
+- Test H lap 3: **"lean lots"** — also a forward lean.
+
+**3 of the 4 false rejects are forward-lean crossings.** Under the current filter, the detector would not detect a lap like Test H #3 at all. On separation: elbow leakers all have h/w ≥ 1.74, so the filter has **zero elbow rejection power** — it only affects bodies.
+
+**Verdict:** the `h/w ≥ 1.5` filter is **anti-correlated with our goal**. It would silently break detection on the exact failure mode (forward lean) we have been investigating since Test G. The filter must be reverted.
+
+### 3. Secondary separation — `fill ratio`
+
+Body fill (n=37):
+
+| range | count | examples |
+|-------|-------|----------|
+| 0.25 | 2 | F15, G2 |
+| 0.26 | 4 | F16, F17, G6 (wait G6=0.32), … |
+| 0.27 | 3 | F12, H8, G11 |
+| 0.28 | 3 | H1, H3, H5 |
+| 0.29 | 2 | F4, F14 |
+| 0.30+ | 23 | majority of Test F, G, H |
+
+Body fill range: **0.25–0.42**, median ≈ 0.30, floor = 0.25.
+
+Elbow fill: 0.20, 0.23, 0.24, 0.25, 0.26, 0.26, 0.37.
+
+| threshold | elbow reject | body reject | clean? |
+|-----------|-------------|-------------|--------|
+| fill < 0.25 | 3/7 (43%) | 0/37 | yes |
+| fill ≤ 0.25 | 4/7 (57%) | 2/37 (5.4%) | no |
+| fill < 0.26 | 4/7 (57%) | 2/37 (5.4%) | marginal |
+| fill < 0.28 | 6/7 (86%) | 9/37 (24%) | no |
+
+**Clean operating point: `fillRatio ≥ 0.25`** (strict >) rejects 3/7 elbows with zero body false-rejects. This is the existing `minFillRatio = 0.25` which is already active with `>=` — the cross-tab confirms it is catching real signal but is not enough alone.
+
+### 4. Other features checked, no useful separation
+
+| feature | body range | elbow range | separation |
+|---------|-----------|-------------|-----------|
+| **blob width w (px)** | 46–164 | 53–143 | complete overlap |
+| **blob height h (px)** | 136–281 | 116–281 | near-total overlap |
+| **hR** | 0.43–0.88 | 0.36–0.88 | overlap (elbows skew lower) |
+| **wR** | 0.26–0.91 | 0.29–1.00 | complete overlap |
+| **area** | 2086–13749 | 1991–9258 | complete overlap |
+| **h/w** | 1.05–3.61 | 1.74–2.75 | complete overlap (elbows inside body range) |
+| **rawDetY** | 124–294 | 99–259 | overlap (elbows go higher, i.e. lower rawDetY values) |
+| **rawDetY / 320** | 0.39–0.92 | 0.31–0.81 | overlap |
+| **buildup** (DETECT) | not uniformly logged | 1, 2, 1, 1, 1, 5, 1, 4, 1 | insufficient body data |
+
+No single feature in the above table gives ≥50% elbow rejection with <10% body false-rejects.
+
+### 5. `detY %-from-blob-top` — the §11.4 hypothesis check
+
+Body detY as a fraction of blob height — where inside the blob the picker lands:
+
+| test | sample | values |
+|------|--------|--------|
+| F (DIAG laps only) | 5 | 30%, 34%, 68%, 78%, 86% |
+| G | 11 | 32%, 32%, 38%, 38%, 45%, 57%, 58%, 62%, 73%, 80%, 87% |
+| H | 9 | 32%, 37%, 40%, 58%, 62%, 69%, 73%, 80%, 84% |
+| all bodies | 25 | **32%–87%, mean ≈ 55%, SD ≈ 19%** |
+
+Body picker Y-position within the blob is **not clustered** — it spans the entire upper-to-lower band and is driven by which stripe (torso vs leg) happens to be the longest vertical run in the gate columns on that frame. This is the §11 / §12 picker failure we already documented.
+
+Elbow detY %-from-blob-top: **cannot be computed reliably** because Test N's table does not record `comp.minY`. Using rawDetY/320 as a proxy (frame-Y fraction): elbows 0.31–0.81, bodies 0.39–0.92 — overlap, no separation.
+
+The §11.4 hypothesis ("PF is top-of-frame weighted") cannot be falsified or confirmed from this cross-tab alone — we need the §12.7 vertical-stick test for that.
+
+### 6. DETECT_DIAG `maxGap / runs / tot` — partial signal, body-only data
+
+We have these fields only for body crossings (Test G full; Test H full; Test F selected laps). Test N emitted only `[DETECT]`, not `[DETECT_DIAG]`, on its 9 leakers. **Direct body-vs-elbow comparison on `maxGap / runs / tot` is not possible from existing logs.** Adding DETECT_DIAG emission for Test N-class detections is the cheapest instrumentation improvement we could make, but it requires another physical test to collect the data.
+
+Qualitative observation from Test G/H DIAG: body lean crossings have high `runs` counts (6–16 per column) and high `maxGap` (up to 94) because the gate column slices a fragmented torso + solid leg stripe. Elbow leakers may or may not show the same pattern — unknown.
+
+### 7. `hRun` (horizontal mask width at detY) — instrumented this session, not yet captured
+
+The diagnostic added at `DetectionEngine.swift:415-434` will record hRun on every future detection. **No hRun data exists yet** — the first physical test to capture it is the next scheduled run. Until then, hRun remains the strongest *untested* theoretical discriminator (torso ~30–60 px thick, elbow ~10–20 px thick at the gate).
+
+### 8. §10 verdict
+
+**Goal of this pass:** find a feature with ≥80% separation already in our logs. **Result:** found, with a twist.
+
+**The separation we found is not a new feature. It is the `localSupportFraction` parameter we recently loosened.**
+
+Specifically:
+- Reverting `localSupportFraction` from **0.15 → 0.25** would reject **5 of 7** Test N elbow leakers (71% — directionally at the ≥80% goal) with **0 of 25 sampled body false-rejects** (the bodies were all measured at a time when that threshold was active, so they all satisfy it by construction).
+- The existing `minFillRatio = 0.25` is correctly catching 3 of 7 elbow leakers as a secondary filter, also with no body false-rejects.
+- The new `minHeightWidthRatio ≥ 1.5` filter catches **zero** elbow leakers but **false-rejects 4 of 37 body crossings** (10.8%), three of which are the exact forward-lean class we are trying to preserve detection on. **The filter is net-negative.**
+
+**The stack-up:**
+
+| filter | catches elbows? | body false rejects? |
+|--------|----------------|--------------------|
+| `localSupportFraction ≥ 0.25` (revert to old value) | 5/7 (71%) | 0/25 (by construction) |
+| `minFillRatio ≥ 0.25` (already active) | 3/7 (43%) | 0/37 |
+| `minHeightWidthRatio ≥ 1.5` (added this session) | 0/7 (0%) | **4/37 (11%)** |
+| union of the first two | **≥ 5/7 (71%)** | 0/~30 |
+
+Under a localSupport revert + keep fill filter + **remove** h/w filter: at least 5/7 Test N leakers would be rejected, zero body crossings would be falsely rejected, and the forward-lean detection case would remain intact.
+
+### 9. Recommended next steps (still doc-only, no detector code changes until user confirms)
+
+**Immediate (highest priority).** Remove `minHeightWidthRatio ≥ 1.5`. It was added this session on a hunch and the cross-tab shows it rejects 4 real body crossings (3 of them leans) with zero elbow-rejection power. Keeping it in conflicts with the project's established direction of protecting lean detection.
+
+**Short-term (propose to user before code change).** Revert `localSupportFraction` from 0.15 back to 0.25. This is a one-line change, it reverts a recent loosening that was done "for earlier firing" without a test confirming it was needed, and it closes the leak path for 5/7 of the current Test N leakers. The 2 remaining leakers (#5 and #6) are small enough to potentially also fail a stricter height filter — worth measuring separately.
+
+**Medium-term (one physical test).** Run the next scheduled physical test (torso-only scenario + elbow-only scenario) *with* the `hRun` instrumentation added this session. This gives:
+1. First direct measurement of horizontal mask thickness at the gate between torso and elbow.
+2. Body-vs-elbow data under the current parameters, so we can re-run this cross-tab with per-row match confidence.
+
+**Longer-term (deferred).** §12.7 vertical-stick test — still the cleanest discriminator for the relative-to-blob vs relative-to-frame question in the picker investigation. Remains next in the Y-picker investigation queue.
+
+### 10. What this cross-tab cannot tell us
+
+- Whether PF's picker would have placed its vertical line on any of the Test N elbow blobs. PF wasn't run in parallel for Test N. We only know whether *our* detector fired.
+- Whether the 5 elbows rejected by the proposed localSupportFraction revert would have been detected at all by PF. The success metric is "replicate PF, not improve on PF" — if PF itself fires on hand swipes the way we're firing, rejecting them is divergence, not fidelity.
+- `maxGap`, `runs`, and `tot` for elbow leakers — Test N did not emit DETECT_DIAG on the leakers, so we cannot compare mask fragmentation patterns body-vs-elbow.
+- hRun for anything — the instrumentation exists but no physical test has captured it yet.
+
+---
+
+## Run 2026-04-07 Test O — post-revert build (localSupportFraction=0.25, no h/w filter); mixed hand swipes + body crossings
+
+**Device / setup:** iPhone, back camera, handheld. Mixed scenario —
+hand/arm swipes followed by real body crossings. User ground-truth
+labeling confirmed after the run: **#1–#4 and #7 were hand swipes**
+(all false positives), **#5, #6, #8 were real body crossings**
+(detected but with residual frame-Y bias ≈ −20). Raw log pasted in
+session transcript
+`.claude/projects/-Users-sondre-Desktop-testingappapril5/d3142f0d-eb51-485e-a5e0-482bf8621ee5.jsonl`.
+
+**Build state — the two parameter changes applied at the top of this
+session (§10 cross-tab outcomes):**
+
+- `minHeightWidthRatio ≥ 1.5` filter **removed** (was active in Test N, the cross-tab showed it would reject 4 of 37 real bodies, 3 of them forward-lean crossings).
+- `localSupportFraction` **reverted 0.15 → 0.25** (0.15 had been set in commit 8003aca "Lower detection thresholds for earlier firing" and the §10 cross-tab showed 5 of 7 Test N elbow leakers had `run / h < 25%`).
+- Unchanged from Test N: `minFillRatio = 0.20`, `maxAspectRatio = 1.2`,
+  `heightFraction = 0.33`, `widthFraction = 0.08`, `frameBiasCap = 0.55`,
+  `gateBandHalf = 2`, all picker and DIAG instrumentation including
+  `hRun` logging (added last session, first physical data captured here).
+
+### Run table — all 8 detections with user ground-truth label
+
+| # | frame | blob (w×h) | hR | wR | fill | run | hRun | area | detY | rawDetY | buildup | exp ms | iso | time (s) | user label |
+|---|-------|-----------|------|------|------|-----|------|------|------|---------|---------|--------|-----|----------|------------|
+| 1 | 206 | 165×140 | 0.44 | 0.92 | 0.22 | 37 | **35** | 5149 | 157 | 157 | 1 | 4.01 | 871 | 6.815 | hand swipe (outlier — wide merged motion) |
+| 2 | 305 | 67×105  | 0.33 | 0.37 | 0.22 | 48 | **7**  | 1563 | 95  | 95  | 1 | 4.01 | 806 | 10.722 | hand swipe |
+| 3 | 358 | 73×115  | 0.36 | 0.41 | 0.24 | 28 | **13** | 2007 | 109 | 109 | 1 | 4.01 | 747 | 12.500 | hand swipe |
+| 4 | 409 | 76×128  | 0.40 | 0.42 | 0.20 | 39 | **12** | 1955 | 112 | 112 | 1 | 4.01 | 749 | 14.194 | hand swipe |
+| 5 | 517 | 99×243  | 0.76 | 0.55 | 0.26 | 65 | **18** | 6141 | 176 | 245 | 1 | 4.01 | 683 | 17.795 | real body (Δy ≈ −19) |
+| 6 | 582 | 135×200 | 0.62 | 0.75 | 0.23 | 66 | **17** | 6221 | 176 | 245 | 2 | 4.01 | 627 | 19.960 | real body (Δy ≈ −19) |
+| 7 | 648 | 95×112  | 0.35 | 0.53 | 0.28 | 29 | **11** | 2954 | 165 | 165 | 8 | 4.01 | 675 | 22.161 | hand swipe (Δy = +5) |
+| 8 | 839 | 158×216 | 0.68 | 0.88 | 0.21 | 63 | **16** | 7007 | 176 | 247 | 2 | 4.01 | 1022 | 28.525 | real body (Δy ≈ −20) |
+
+### USER_MARK Δy subtable
+
+| # | time | detY | userY | Δy | note |
+|---|------|------|-------|----|----|
+| 5 | 17.795 | 176 | 157 | −19 | real body, frame-Y clamp bias (rawDetY 245 → detY 176) |
+| 5 | 17.795 | 176 | 158 | −18 | duplicate tap |
+| 6 | 19.960 | 176 | 157 | −19 | real body, same clamp bias |
+| 7 | 22.161 | 165 | 170 | +5  | hand swipe — detY not clamped (rawDetY=165 < cap 176) |
+| 8 | 28.525 | 176 | 156 | −20 | real body, same clamp bias |
+
+The ≈ −19/−20 on the three real-body crossings is the `frameBiasCap =
+0.55` clamp in action (`rawDetY ∈ {245, 245, 247}` → `detY = 176`).
+This is **unchanged since commit 9953368** ("Add frame-Y bias cap
+(55%) to clamp lean-crossing detY into upper body") and is **not a
+regression** from this session's parameter changes. It is the known
+§11 / §12 picker bug still waiting on the §12.7 vertical-stick test.
+
+Per the `feedback_pf_no_dot_only_x_line.md` memory, userY is finger-tap
+noise, not a PF-reported ground truth (PF draws only a vertical line,
+no dot). These Δy numbers are useful **only** as "did the clamp fire
+in the expected direction" — not as an absolute picker error budget.
+
+### Rejection evidence — the localSupportFraction revert IS firing
+
+The revert from 0.15 → 0.25 is visibly working on mid/tall candidates.
+72 distinct `[REJECT] local_support` entries in the log for this run.
+Representative samples (from the transcript):
+
+| frame | `run` / `need` | notes |
+|-------|----------------|-------|
+| 18 | 16 / 33 | far below need — rejected |
+| 19 | 9 / 35  | |
+| 112–118 | 13–16 / 27–29 | sustained rejection window |
+| 137 | 5 / 31 | |
+| 153–155 | 4–11 / 27–35 | |
+| 194–195 | 22–23 / 29–30 | just-barely-misses — would have passed at 0.15 |
+| 237–239 | 4–22 / 29–37 | |
+| 275–276 | 18–19 / 32 | |
+| 384 | 16 / 27 | |
+
+The `run=22 need=30` and `run=23 need=29` near-misses at frames 194–195
+are exactly the "mid/tall blob run just under 25%" cases the §10 cross-tab
+targeted. Before the revert these would have fired (0.15 × h would have
+been 12–15).
+
+### Leak mechanism — why 4 hand swipes still slipped through
+
+For blobs with `h < 170`, the `run ≥ max(3, h × 0.25, H × 0.08)` rule is
+dominated by the **frame-absolute floor** `H × 0.08 = 320 × 0.08 = 26`.
+Not `h × 0.25`. Concretely:
+
+| # | h | h × 0.25 | floor (H × 0.08) | effective `need` | `run` | passes? |
+|---|---|----------|------------------|-------------------|-------|---------|
+| 1 | 140 | 35 | 26 | **35** | 37 | yes (barely) |
+| 2 | 105 | 26 | 26 | **26** | 48 | yes |
+| 3 | 115 | 29 | 26 | **29** | 28 | yes (within 1 column rounding) |
+| 4 | 128 | 32 | 26 | **32** | 39 | yes |
+| 5 | 243 | 61 | 26 | **61** | 65 | yes |
+| 6 | 200 | 50 | 26 | **50** | 66 | yes |
+| 7 | 112 | 28 | 26 | **28** | 29 | yes (barely) |
+| 8 | 216 | 54 | 26 | **54** | 63 | yes |
+
+The §10 cross-tab computed `need = h × 0.25` on Test N leakers that
+all had `h ∈ 116–281`, so the `h × 0.25` value *was* the binding
+constraint for that sample and the "71% rejection" prediction held.
+For **Test O's smaller-blob swipes** (`h ∈ 105–128` for crossings
+#2–#4 and #7), `h × 0.25 ≈ 26–32` which is at or just above the
+frame-absolute floor of 26. The revert moves the needle by at most
+6 px on these blobs — not enough to catch them. **The §10 cross-tab
+over-promised on small-blob swipes.** This is the gap to update in
+the §10 caveat.
+
+### hRun split — first physical measurement of the §7 / §13 theorized discriminator
+
+Hand swipes vs real bodies, by `hRun` (horizontal mask width at detY):
+
+| class | n | hRun values | range |
+|-------|---|-------------|-------|
+| hand swipe | 5 | 7, 11, 12, 13, **35** | 7–35 |
+| real body | 3 | 16, 17, 18 | 16–18 |
+
+Four of five hand swipes have `hRun ≤ 13`. All three bodies have
+`hRun ≥ 16`. A threshold at `hRun ≥ 15` would:
+
+- reject crossings **#2, #3, #4, #7** (4 hand swipes correctly),
+- preserve crossings **#5, #6, #8** (3 real bodies correctly),
+- miss crossing **#1** (hand swipe with `hRun = 35` — a wide merged-motion
+  blob that looks geometrically like a body at the detection row).
+
+**n = 8 is too small to commit to a filter.** The split is
+*suggestive*, not conclusive. Crossing #1 demonstrates that `hRun`
+alone cannot catch every false positive — a single merged-motion
+blob with body-like horizontal extent defeats the filter.
+
+### Key observations
+
+1. **The revert works on its intended class** (mid/tall `run < h × 0.25`
+   candidates) — visible in 72 `local_support` rejects across the run.
+2. **The revert cannot work on small-blob swipes** — the frame-absolute
+   `need` floor is binding for `h < 170`, so the lowered
+   `localSupportFraction` is bypassed entirely. §10's "71% rejection"
+   holds only for the Tests K–N class of elbow leakers, not this one.
+3. **hRun now has its first physical datapoint** and separates the
+   8-crossing sample cleanly except for one merged-motion outlier.
+4. **No picker regression.** The `−19/−20` Δy on the 3 body crossings
+   is the pre-existing `frameBiasCap = 0.55` clamp firing on tall
+   forward-lean blobs — unchanged from prior sessions.
+
+### What Test O does NOT tell us
+
+- **Whether PF fires on the same hand swipes.** There was no parallel
+  Photo Finish capture on this run. Per the `feedback_replicate_not_improve_pf.md`
+  memory and CLAUDE.md operating-mode §4, we cannot commit an `hRun`
+  filter as a code change until we know whether rejecting these blobs
+  would be fidelity to PF or divergence from PF.
+- **Whether `hRun ≥ 15` holds on forward-lean body crossings.** All 3
+  bodies in this sample are tall (h ∈ 200–243) and likely upright-ish
+  at the gate. Lean crossings at the severity of Tests G/H were not
+  repeated in Test O — the `hRun ≥ 16` lower bound needs confirmation
+  on leans before any threshold is committed.
+- **The merged-motion outlier (crossing #1) prevalence.** One data
+  point. Could be a one-off. Could be ~20 % of real-world swipes. We
+  don't know.
+
+---
+
+## Run 2026-04-07 Test P — PF parallel capture, elbow/hand swipes + regular walking + leans
+
+**Device / setup:** iPhone, **front camera** (log shows
+`[CAMERA] switched to front`), handheld. Parallel Photo Finish
+session on a second phone. Raw log: `~/Downloads/testP.rtf` (the
+user-written labeling narrative is at the end of the file, reproduced
+below).
+
+**Build state:** unchanged from Test O — `localSupportFraction = 0.25`,
+no `minHeightWidthRatio`, `minFillRatio = 0.20`, `maxAspectRatio = 1.2`,
+`frameBiasCap = 0.55`.
+
+### User labeling (pasted verbatim from log comment)
+
+> I did some hand swipes that were all rejected in the beginning,
+> circular motion thin hand swipes then I did some of the elbow test,
+> body outside frame but creating a vertical blob from elbow to
+> fingers, (Photo finish did not detect on this but we did) this is
+> lap 1–9 then lap 10, 11, 12, 13 are regular walking and the rest
+> are with leaning with or without arm. 17: arm backwards chest
+> first, 16: not sure what happened on that one, 15 lean with arms
+> out, 14 regular lean
+
+Plus user follow-up: "13 was placed correctly, 18 you can avoid".
+
+**Blocks (for analysis, #18 excluded per user instruction):**
+
+- **Block 1 — elbow test, body out of frame, PF silent, we fired:** #1–#9 (n=9)
+- **Block 2 — regular walking, PF fired, we fired:** #10, #11, #12, #13 (n=4)
+- **Block 3 — leans, PF fired, we fired:** #14, #15, #16, #17 (n=4; #16 user-uncertain)
+
+The "circular motion thin hand swipes" the user did at the start of
+the session were **rejected before reaching `[DETECT]`** — they show
+up in the 137 `local_support` rejects, 130 `fill_ratio` rejects, and
+41 `aspect_ratio` rejects in the earlier frames.
+
+### Reject tally for the whole run
+
+| reason | count |
+|--------|-------|
+| `height` | 560 |
+| `no_gate_intersection` | 225 |
+| `local_support` | 137 |
+| `fill_ratio` | 130 |
+| `aspect_ratio` | 41 |
+| `width` | 8 |
+| `body_part_suppression` | 1 |
+
+`local_support` still firing heavily → the 0.15 → 0.25 revert is still
+doing its job. `fill_ratio` at 130 rejects confirms the spec-questionable
+`minFillRatio = 0.20` filter is also catching thin/hollow motion.
+
+### Run table — 17 detections, with block labels, hRun, and PF fired?
+
+PF fired on blocks 2 and 3 (all real bodies). PF silent on block 1
+(all 9 elbow/arm blobs with body out of frame) per user narrative.
+
+| # | time | blob w×h | hR | wR | fill | run | hRun | rawDetY → detY | blob y range | block | PF | user note |
+|---|------|----------|------|------|------|-----|------|----------------|--------------|-------|----|-----------|
+| 1 | 6.809 | 65×114 | 0.36 | 0.36 | 0.42 | 50 | **16** | 56 | 10..123 | 1 elbow | silent | — |
+| 2 | 8.515 | 39×113 | 0.35 | 0.22 | 0.51 | 54 | **11** | 69 | 21..133 | 1 elbow | silent | — |
+| 3 | 9.220 | 100×127 | 0.40 | 0.56 | 0.31 | 51 | **17** | 50 | 19..145 | 1 elbow | silent | — |
+| 4 | 10.808 | 49×113 | 0.35 | 0.27 | 0.37 | 28 | **14** | 74 | 33..145 | 1 elbow | silent | — |
+| 5 | 11.553 | 51×112 | 0.35 | 0.28 | 0.47 | 54 | **8**  | 65 | 27..138 | 1 elbow | silent | — |
+| 6 | 14.282 | 105×116 | 0.36 | 0.58 | 0.27 | 41 | **15** | 78 | 25..140 | 1 elbow | silent | — |
+| 7 | 19.124 | 22×107 | 0.33 | 0.12 | 0.30 | 34 | **9**  | 93 | 47..153 | 1 elbow | silent | — |
+| 8 | 23.454 | 88×142 | 0.44 | 0.49 | 0.27 | 37 | **12** | 165 | 92..233 | 1 elbow | silent | — |
+| 9 | 24.848 | 103×120 | 0.38 | 0.57 | 0.29 | 30 | **6**  | 103 | 25..144 | 1 elbow | silent | — |
+| 10 | 29.391 | 110×257 | 0.80 | 0.61 | 0.37 | 64 | **14** | 271→176 | 61..317 | 2 walking | fired | — |
+| 11 | 32.193 | 129×135 | 0.42 | 0.72 | 0.31 | 42 | **11** | 138 | 100..234 | 2 walking | fired | — |
+| 12 | 35.014 | 61×141 | 0.44 | 0.34 | 0.33 | 49 | **11** | 163 | 67..207 | 2 walking | fired | — |
+| 13 | 37.860 | 81×251 | 0.78 | 0.45 | 0.34 | 67 | **14** | 268→176 | 65..315 | 2 walking | fired | **"placed correctly"** |
+| 14 | 40.338 | 113×177 | 0.55 | 0.63 | 0.32 | 46 | **15** | 276→176 | 143..319 | 3 lean | fired | "regular lean" |
+| 15 | 46.231 | 165×290 | 0.91 | 0.92 | 0.24 | 92 | **14** | 253→176 | 30..319 | 3 lean | fired | "lean with arms out" |
+| 16 | 49.369 | 127×189 | 0.59 | 0.71 | 0.32 | 75 | **19** | 272→176 | 131..319 | 3 lean | fired | "not sure what happened" |
+| 17 | 51.445 | 49×148 | 0.46 | 0.27 | 0.23 | 38 | **13** | 287→176 | 168..315 | 3 lean | fired | "arm backwards chest first" |
+| ~~18~~ | 53.345 | 80×120 | — | — | — | — | — | — | — | excluded | — | "you can avoid" |
+
+### 🚨 hRun hypothesis — REFUTED
+
+The Test O working model said hand swipes cluster at `hRun ≤ 13` and
+real bodies at `hRun ≥ 16`. Test P **completely falsifies this split**:
+
+| class | n | hRun values (sorted) | range |
+|-------|---|---------------------|-------|
+| elbow (block 1, PF silent) | 9 | 6, 8, 9, 11, 12, 14, 15, 16, 17 | 6–17 |
+| regular walking (block 2, PF fired) | 4 | 11, 11, 14, 14 | 11–14 |
+| lean body (block 3, PF fired) | 4 | 13, 14, 15, 19 | 13–19 |
+| all real bodies | 8 | 11, 11, 13, 14, 14, 14, 15, 19 | 11–19 |
+
+**Complete overlap.** Applying `hRun ≥ 15`:
+
+- would reject **6/9 elbows** (67 %) — keeps #1(16), #3(17), #6(15)
+- would reject **6/8 bodies** (75 %!) — keeps only #14(15) and #16(19)
+
+The filter rejects more bodies than elbows. There is no clean
+threshold. Lowering to `hRun ≥ 10` would:
+- reject 3/9 elbows (33 %) — #5(8), #7(9), #9(6)
+- reject 0/8 bodies (0 %)
+
+`hRun ≥ 10` is safe on this sample but catches only 3 of the 9 PF-silent
+false-positives, so it's not a useful standalone filter either.
+
+**Verdict per §13.5 decision matrix:** row 3 hits — "PF rejects thin
+arms but any lean has `hRun < 15` → filter is unsafe. Either lower the
+threshold and re-decide, or pivot back to §12.7." Lowering gets us to
+`hRun ≥ 10` as the only safe threshold, which discards only 3 of 9
+elbow false-positives. **Reject the hRun filter. Do not add it.**
+
+### Why the hRun signal collapsed — picker is landing on thin stripes of real bodies
+
+The reason `hRun = 11–14` for four of four regular-walking bodies is
+not "bodies are thin" — it's that the picker is landing on a **thin
+horizontal row of the body**, not on the torso stripe. Concretely,
+looking at where `rawDetY` lands relative to each blob's y-range
+(before the clamp):
+
+| # | blob y range | rawDetY | position in blob |
+|---|--------------|---------|------------------|
+| 10 | 61..317 (h=257) | 271 | 82 % down the blob — lower leg / shin |
+| 11 | 100..234 (h=135) | 138 | 28 % down — upper torso |
+| 12 | 67..207 (h=141) | 163 | 68 % down — lower torso |
+| 13 | 65..315 (h=251) | 268 | 81 % down — shin |
+| 14 | 143..319 (h=177) | 276 | 75 % down — thigh/shin |
+| 15 | 30..319 (h=290) | 253 | 77 % down — knee/shin |
+| 16 | 131..319 (h=189) | 272 | 75 % down — thigh |
+| 17 | 168..315 (h=148) | 287 | 80 % down — shin |
+
+The picker is landing in the **lower 75–82 % of the blob** on almost
+every body (#10, #13, #14, #15, #16, #17). That's legs. Legs are narrow
+at the scan row — hRun = 11–14 px is consistent with a single shin.
+**This is §11 and §12 reappearing in the hand-swipe data.**
+
+The `frameBiasCap = 0.55` clamp hides this on the output (`detY = 176`
+in every clamp case) but `rawDetY` shows the picker still prefers
+legs over torso. **hRun measured at the picker's chosen row therefore
+measures leg width, not body width.** The hypothesis "hRun = 30–60 px
+for torso" was never wrong in principle — it assumed the picker was
+landing on the torso, which it is not.
+
+### Unifying Test P with §11 / §12
+
+Test P is, unexpectedly, **another data point for the §11/§12 picker
+bug**, not a hand-swipe discriminator test. If the picker landed at
+the upper portion of the blob (torso level), every row in the body
+table would have hRun in the 30–60 px range, and the separation from
+the hand-swipe 6–17 px range would be clean. The §12.5 temporal-wait
+rule — PF waits for the upper-blob mask to arrive at the gate before
+firing — would simultaneously:
+
+1. Put body `hRun` readings in the torso-width range → cleanly
+   separates from elbow hRun.
+2. Reject the elbow block 1 false-positives because an elbow swipe
+   has no stable upper-mass arriving at the gate — just a single
+   tip-of-arm stripe.
+
+**This strongly suggests §12.7 (vertical stick test) is still the
+right investigation to run next**, and that fixing the picker
+dissolves the hand-swipe false-positive problem as a free consequence
+— exactly the prediction at the end of the audit plan §1 (pivot-that-got-lost).
+
+### Alternative lead observed — blob **height** separates cleanly on this sample
+
+Not the primary finding, but noted for completeness. Blob heights:
+
+| class | n | h values (sorted) | range |
+|-------|---|-------------------|-------|
+| elbow (block 1) | 9 | 107, 112, 113, 113, 114, 116, 120, 127, 142 | 107–142 |
+| all real bodies | 8 | 135, 141, 148, 177, 189, 251, 257, 290 | 135–290 |
+
+Overlap is 135 ≤ h ≤ 142 (elbow max = 142, body min = 135). At
+`heightFraction ≥ 0.44` (`h ≥ 141`):
+
+- reject **9/9 elbows** (100 %)
+- reject **#11 (h=135) and #12 (h=141)** — both "regular walking"
+  bodies whose blobs sit in the middle of the frame (y=100..234 and
+  y=67..207), not touching top or bottom — suggesting the user's full
+  body was not captured in the frame-diff (probably a partial body
+  visible). Under the current spec, partial-body crossings at these
+  heights are inside the `heightFraction = 0.33` envelope and should
+  be detected.
+
+**Do not commit this either.** Two reasons:
+
+1. n = 17. The Test O → Test P shift just taught us that n = 8 is
+   dangerous for committing filter thresholds. We should not repeat
+   the mistake at n = 17.
+2. Rejecting #11 and #12 (both real-body walking crossings) would be
+   a regression on partial-body framing. The current
+   `heightFraction = 0.33` is already stricter than the spec's
+   ~0.30; raising it to 0.44 is a 33 % tightening on top of a
+   parameter that's already above spec.
+
+The h-threshold observation is a **lead**, not a filter. If the next
+physical test confirms the pattern on a bigger sample, and if PF also
+rejects the Block 2-style partial-body cases (which would be
+surprising), then it comes back to the table.
+
+### What Test P actually resolved
+
+1. **hRun filter hypothesis: refuted.** Delete the `hRun ≥ 15` option
+   from the next-step queue.
+2. **PF is cleaner on elbow swipes than we are**, 9/9. This is a real
+   divergence we need to close, but not via hRun.
+3. **The §11/§12 picker bug is more severe than previously thought.**
+   On regular walking bodies, the picker lands 75–82 % down the blob
+   (legs), not on the torso. This is direct evidence for the §12.5
+   temporal-wait hypothesis being the correct fix.
+4. **The `localSupportFraction = 0.25` revert is stable** at 137
+   rejects per run. Keep it.
+5. **§10 cross-tab's "71 % rejection" caveat is now a fully closed
+   gap** — the small-blob class was also not catchable by `hRun`.
+6. **§12.7 vertical-stick test is back at the top of the queue.**
+
+### Next physical test — return to §12.7 vertical-stick test
+
+The plan to run the vertical-stick test (`detector_hypotheses.md §12.7`)
+has been pending since 2026-04-07. Test P's picker-landing analysis
+provides fresh motivation: every regular walking body fired with the
+picker landing in the legs, and fixing that is the unified solution
+for both the lean Δy bug and the hand-swipe false-positive problem.
+
+Test P produced **no evidence** for adding a code-level filter. The
+next session should run §12.7 exactly as written.
+
+---

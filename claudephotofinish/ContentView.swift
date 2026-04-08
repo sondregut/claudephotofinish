@@ -613,7 +613,6 @@ struct ContentView: View {
                 } else {
                     autoExposureSection
                 }
-                detectionSection
             }
             .navigationTitle("Camera Tuning")
             .navigationBarTitleDisplayMode(.inline)
@@ -714,22 +713,6 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.small)
             }
-        }
-    }
-
-    private var detectionSection: some View {
-        Section("Detection tuning") {
-            HStack {
-                Text("Min h/w ratio")
-                Spacer()
-                Text(String(format: "%.2f", camera.minHeightWidthRatio))
-                    .font(.system(.body, design: .monospaced))
-                    .foregroundStyle(.blue)
-            }
-            Slider(value: $camera.minHeightWidthRatio, in: 0.5...3.0, step: 0.05)
-            Text("Reject blobs shorter than this × their width. 1.5 = blob must be 50% taller than wide. Higher = stricter (rejects more hand swipes but may reject leaning bodies).")
-                .font(.caption)
-                .foregroundStyle(.tertiary)
         }
     }
 

@@ -43,13 +43,6 @@ final class CameraManager: NSObject, ObservableObject {
         didSet { if isManualExposure { applyExposureSettings() } }
     }
 
-    // Hand swipe discriminator (2026-04-07): minimum blob height/width ratio.
-    // Bodies are always taller than wide; arm sweeps produce squarish blobs.
-    // Forwards to DetectionEngine.minHeightWidthRatio.
-    @Published var minHeightWidthRatio: Float = 1.5 {
-        didSet { engine.minHeightWidthRatio = minHeightWidthRatio }
-    }
-
     // Live readouts sampled from the capture queue. Updated ~once/sec to avoid
     // thrashing SwiftUI on the main thread.
     @Published var currentExposureMs: Double = 0
