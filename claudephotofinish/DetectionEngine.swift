@@ -79,6 +79,7 @@ final class DetectionEngine {
     private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
     private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
+    private let spikeRatioThreshold: Float = 1.5 // §15: arm-spike rejection — if hRun at detY > median × this, re-pick
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
     // Gate
@@ -310,12 +311,18 @@ final class DetectionEngine {
             return nil
         }
 
+        // §15 Arm-spike correction: from the side, a torso has uniform horizontal
+        // extent (~22-24 px) but an arm sticking out creates a sharp spike (~50+ px).
+        // If the picker landed on a spike row, shift detY to the non-spike torso region.
+        let spikeResult = adjustForArmSpike(detY: candidate.detY, comp: candidate.comp)
+        let pickerDetY = spikeResult.adjustedDetY
+
         // §12.5 frame-Y bias cap (hypothesis B): clamp picker output to top N% of frame.
         // If the picker lands below the cap (deeper into legs on lean crossings), snap up
         // to the cap. Safety floor: never clamp above the blob's topmost pixel.
-        // Interpolation (detRow below) still uses the ORIGINAL picker Y for timing accuracy.
+        // Interpolation (detRow below) still uses the spike-adjusted picker Y for timing accuracy.
         let frameCap = Int(Float(processHeight) * frameBiasCap)
-        let clampedDetY = max(candidate.comp.minY, min(candidate.detY, frameCap))
+        let clampedDetY = max(candidate.comp.minY, min(pickerDetY, frameCap))
 
         // Log all size-qualified components for diagnostics
         let qualComps = components.filter { $0.height >= minH && $0.width >= minW }
@@ -350,7 +357,7 @@ final class DetectionEngine {
         // At the detection row (detY), find the continuous horizontal run of mask
         // pixels containing the gate. This is the leading-edge strip — its extent
         // on each side of the gate gives the distances for interpolation.
-        let detRow = candidate.detY
+        let detRow = pickerDetY
         let prevSec = CMTimeGetSeconds(previousTimestamp)
         let dt = now - prevSec
 
@@ -417,8 +424,14 @@ final class DetectionEngine {
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d",
-                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection))
+        let spikeTag = spikeResult.corrected ? " SPIKE_CORRECTED" : ""
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d%@",
+                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection, spikeTag))
+
+        // §15 instrumentation: per-row hRun profile at the gate column
+        if !spikeResult.profile.isEmpty {
+            print("[HRUN_PROFILE] frame=\(frameIndex) median=\(spikeResult.median) detYhRun=\(spikeResult.detYHRun) corrected=\(spikeResult.corrected) pickerY=\(candidate.detY) adjY=\(pickerDetY) rows=[\(spikeResult.profile)]")
+        }
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
@@ -935,6 +948,104 @@ final class DetectionEngine {
             maxVerticalRun: overallBestAvg,
             winWindowStart: overallBestWi
         )
+    }
+
+    // MARK: - §15 Arm-Spike Correction
+    //
+    // From the side, a torso has uniform horizontal extent per row (~22-24 px)
+    // but an arm sticking forward creates a sharp spike (~50+ px) at the arm
+    // rows. This function detects that spike in the per-row hRun profile and
+    // shifts detY away from it, into the longest contiguous band of non-spike
+    // (torso) rows.
+
+    private struct SpikeResult {
+        var adjustedDetY: Int
+        var profile: String    // sampled per-row hRun for [HRUN_PROFILE] logging
+        var median: Int
+        var detYHRun: Int
+        var corrected: Bool
+    }
+
+    private func adjustForArmSpike(detY: Int, comp: Component) -> SpikeResult {
+        let W = processWidth
+
+        // Find the contiguous vertical mask run at the gate column containing detY
+        guard detY >= 0, detY < processHeight,
+              maskBuf[detY * W + gateColumn] != 0 else {
+            return SpikeResult(adjustedDetY: detY, profile: "", median: 0, detYHRun: 0, corrected: false)
+        }
+
+        var runTop = detY
+        while runTop > comp.minY && maskBuf[(runTop - 1) * W + gateColumn] != 0 { runTop -= 1 }
+        var runBot = detY
+        while runBot < comp.maxY && maskBuf[(runBot + 1) * W + gateColumn] != 0 { runBot += 1 }
+
+        let runHeight = runBot - runTop + 1
+        guard runHeight >= 10 else {
+            return SpikeResult(adjustedDetY: detY, profile: "", median: 0, detYHRun: 0, corrected: false)
+        }
+
+        // Compute hRun + xMin/xMax at each row in the run by scanning left/right from gate
+        var rowHRuns = [Int](repeating: 0, count: runHeight)
+        var rowXMin = [Int](repeating: 0, count: runHeight)
+        var rowXMax = [Int](repeating: 0, count: runHeight)
+        for i in 0..<runHeight {
+            let y = runTop + i
+            var lx = gateColumn, rx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[y * W + sx] != 0 { lx = sx; sx -= 1 }
+            sx = gateColumn + 1
+            while sx < W && maskBuf[y * W + sx] != 0 { rx = sx; sx += 1 }
+            rowHRuns[i] = rx - lx + 1
+            rowXMin[i] = lx
+            rowXMax[i] = rx
+        }
+
+        // Median hRun
+        let sorted = rowHRuns.sorted()
+        let median = sorted[sorted.count / 2]
+        let threshold = Float(median) * spikeRatioThreshold
+
+        let detIdx = detY - runTop
+        let detYHRun = (detIdx >= 0 && detIdx < runHeight) ? rowHRuns[detIdx] : 0
+
+        // Build sampled profile log string (~30 samples max to keep log manageable)
+        // Format: y:hRun(xMin-xMax)  e.g. 235:8(69-76) means row 235 is 8px wide from x=69 to x=76
+        let step = max(1, runHeight / 30)
+        var parts = [String]()
+        for i in stride(from: 0, to: runHeight, by: step) {
+            let y = runTop + i
+            let spike = Float(rowHRuns[i]) > threshold ? "*" : ""
+            parts.append("\(y):\(rowHRuns[i])(\(rowXMin[i])-\(rowXMax[i]))\(spike)")
+        }
+        let profileStr = parts.joined(separator: " ")
+
+        // If detY's hRun is not a spike, return unchanged
+        guard Float(detYHRun) > threshold, median > 0 else {
+            return SpikeResult(adjustedDetY: detY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: false)
+        }
+
+        // Spike detected — find the longest contiguous band of non-spike rows
+        var bestStart = 0, bestLen = 0
+        var curStart = 0, curLen = 0
+
+        for i in 0..<runHeight {
+            if Float(rowHRuns[i]) <= threshold {
+                if curLen == 0 { curStart = i }
+                curLen += 1
+            } else {
+                if curLen > bestLen { bestLen = curLen; bestStart = curStart }
+                curLen = 0
+            }
+        }
+        if curLen > bestLen { bestLen = curLen; bestStart = curStart }
+
+        guard bestLen > 0 else {
+            return SpikeResult(adjustedDetY: detY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: false)
+        }
+
+        let adjustedDetY = runTop + bestStart + bestLen / 2
+        return SpikeResult(adjustedDetY: adjustedDetY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: true)
     }
 
     // MARK: - Diagnostic: per-column gate stats
