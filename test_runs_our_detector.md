@@ -3160,3 +3160,125 @@ Test P produced **no evidence** for adding a code-level filter. The
 next session should run §12.7 exactly as written.
 
 ---
+
+## Run 2026-04-08 Test R — front camera, normal walks vs arm-lifted crossings
+
+**Setup:** front camera, dark shirt on light background, ~4ms exposure, iso 340-590. 11 crossings total: laps 1-5 normal walks, laps 6-10 arm lifted overhead (slow walks), lap 11 extra crossing. PF run in parallel — USER_MARK taps placed where PF's vertical line appeared on our thumbnails.
+
+**Algorithm state:** spike detection (§15) active with xMin/xMax HRUN_PROFILE logging, frameBiasCap=0.55, minFillRatio=0.20.
+
+### Detection summary
+
+| Lap | frame | blob | fill | buildup | detY | rawDetY | median hRun | spike rows | type |
+|-----|-------|------|------|---------|------|---------|-------------|------------|------|
+| 1 | 307 | 80×211 | 0.27 | 2 | 176 | 182 | 7 | 204:20*, 216:20* | walk |
+| 2 | 444 | 129×258 | 0.23 | 3 | 176 | 187 | 9 | 196:19* | walk |
+| 3 | 541 | 128×172 | 0.30 | 3 | 176 | 185 | 15 | 188-193: 39-41* (arm swing) | walk |
+| 4 | 633 | 138×188 | 0.22 | 2 | 176 | 192 | 11 | 175:18*, 176:20* | walk |
+| 5 | 739 | 104×202 | 0.28 | 2 | 176 | 178 | 15 | 179-187: 30-35* (arm swing) | walk |
+| 6 | 836 | 57×145 | 0.21 | 1 | 164 | 164 | 7 | 136:12* | arm |
+| 7 | 928 | 28×136 | 0.28 | 4 | 176 | 180 | 7 | 204:14* | arm |
+| 8 | 1031 | 92×140 | 0.22 | 2 | 171 | 171 | 7 | 206:22* | arm |
+| 9 | 1124 | 45×159 | 0.24 | 5 | 176 | 181 | 8 | none | arm |
+| 10 | 1218 | 61×149 | 0.30 | 3 | 176 | 184 | 8 | 207-209: 13-20* | arm |
+| 11 | 1311 | 76×109 | 0.38 | 1 | 144 | 144 | 8 | 129:17*, 162:37* | arm |
+
+### PF comparison (USER_MARK = where PF's line appeared)
+
+| Lap | Type | Our gate X | PF userX | Δx | Notes |
+|-----|------|------------|----------|----|-------|
+| 1 | walk | 90 | 91, 88 | ~1 | match |
+| 2 | walk | 90 | 95 | 5 | close |
+| 3 | walk | 90 | 95, 96 | ~5 | close |
+| 4 | walk | 90 | 94 | 4 | close |
+| 5 | walk | 90 | 76, 75 | ~15 | PF fired earlier |
+| 6 | arm | 90 | 94 | 4 | close |
+| 7 | arm | 90 | 92 | 2 | match |
+| 8 | arm | 90 | 132, 135 | ~43 | PF fired much later |
+| 9 | arm | 90 | 65, 62 | ~27 | PF fired much earlier |
+| 10 | arm | 90 | 130 | 40 | PF fired much later |
+
+### Observations
+
+1. **Normal walks (#1-5):** PF and our detector fire at similar X positions (Δx ≤ 15). Walks #3 and #5 show arm spikes from natural arm swing (39-41 px on 15 px median body) — natural arm motion creates bigger spikes than intentional arm-lifting.
+
+2. **Arm-lifted crossings (#6-10):** Arm raised overhead doesn't fuse with the torso blob as expected — profiles are thin (7-8 px median), blobs are small. The arm overhead stays separate from the torso in connected components. However, detection fires late: lap 7 buildup=4, lap 9 buildup=5, with fill_ratio rejects (0.08-0.19) dominating the reject sequences. The arm inflates the bounding box without filling it.
+
+3. **PF is also inconsistent on arm-lifted crossings:** userX varies from 62 to 135 across arm crossings, vs 75-96 for walks. PF either fires very early or very late on arm-raised poses.
+
+4. **xMin/xMax logging works:** silhouette shape clearly visible. Arm spikes extend rightward (e.g. lap 3 rows 188-193: x=66-111 vs body x=83-93).
+
+5. **Spike detection never fired** — picker avoided spike rows naturally on all 11 crossings.
+
+6. **No parameter changes made.** Need more testing before adjusting fill ratio or other thresholds.
+
+---
+
+## Run 2026-04-07 Test S — front camera, arm-raised walks with tightFill diagnostic
+
+**Setup:** front camera, 6 crossings attempted (back-and-forth, all arm-raised walks), PF running in parallel. tightFill diagnostic active — logs what fill would be if spike rows excluded from height.
+
+**Algorithm state:** spike detection (§15) active, tightFill diagnostic in fill_ratio reject log, frameBiasCap=0.55, minFillRatio=0.20.
+
+### Detection summary
+
+| Lap | frame | blob | fill | buildup | dir | hRun median | notes |
+|-----|-------|------|------|---------|-----|-------------|-------|
+| 1 | 257 | 57×136 | 0.34 | 2 | R>L | 3 | clean |
+| 2 | 341 | 111×178 | 0.21 | 2 | L>R | 12 | spike rows 212,214-222* |
+| 3 | 436 | 86×179 | 0.25 | 2 | R>L | 8 | clean profile |
+| **missed** | 535-567 | — | 0.11-0.20 | **6** | L>R | — | never fired, fill+local_support |
+| 4 | 638 | 77×168 | 0.26 | 1 | R>L | 9 | clean profile |
+| 5 | 725 | 104×163 | 0.22 | 3 | L>R | 6 | spike rows at 233-242* |
+
+### Missed crossing analysis (frames 535-567)
+
+The L→R crossing between #3 and #4 never triggered. Reject sequence:
+- frames 535-541: fill_ratio 0.11-0.12 (blob entering gate, sparse)
+- frames 542-548: local_support (run=6-42 vs need=34-57), buildup reached 6
+- frame 549: fill_ratio 0.20 (borderline — floating point just under threshold)
+- frames 550-555: local_support (run=11-31 vs need=51-54)
+- frame 556: fill_ratio 0.16, 0.18
+- frames 557-567: no_gate_intersection (blob left gate)
+
+The blob never satisfied all checks on the same frame. Fill was borderline and local_support kept falling short.
+
+### tightFill diagnostic results
+
+Most frames returned -1.00 (blob center had no mask pixel at gate column — fragmented blob). When it did compute:
+
+| frame | fillRatio | tightFill | ratio |
+|-------|-----------|-----------|-------|
+| 164 | 0.13 | 0.44 | 3.4× |
+| 251 | 0.17 | 0.57 | 3.4× |
+| 336 | 0.19 | 0.94 | 4.9× |
+| 430 | 0.18 | 0.84 | 4.7× |
+| 631 | 0.16 | 0.54 | 3.4× |
+
+All tightFill values well above 0.20. Confirms arm inflation is causing the fill drop — trimming spike rows from the height would pass these blobs.
+
+### PF comparison (USER_MARK = PF detection position)
+
+| Lap | Our gate X | PF userX | Δx | Notes |
+|-----|------------|----------|----|-------|
+| 1 | 90 | 137 | +47 | PF fired much later |
+| 2 | 90 | 55 | -35 | PF fired much earlier |
+| 3 | 90 | 128 | +38 | PF fired much later |
+| 4 | 90 | 140 | +50 | PF fired much later |
+| 5 | 90 | 89 | -1 | match |
+
+PF Δx range: -35 to +50. Highly inconsistent — corroborates Test R finding that PF also struggles with arm-raised poses.
+
+### Observations
+
+1. **tightFill confirms the hypothesis:** when computable, tightFill is 0.44-0.94 (3-5× higher than raw fillRatio). The arm inflates the bounding box; a tighter fill calc would pass these blobs.
+
+2. **tightFill coverage is poor:** returns -1 on most frames because `diagTightFill` starts from the blob's geometric center, which may not have a mask pixel at the gate column on fragmented blobs. The diagnostic needs to start from a row known to be in the gate run, not from blob center.
+
+3. **One crossing completely missed:** buildup reached 6 but fill_ratio AND local_support alternated failures — never both passed on the same frame.
+
+4. **PF remains highly inconsistent on arm-raised:** Δx from -35 to +50 across 5 crossings. Both detectors struggle with this pose.
+
+5. **Spike detection still never fired** — picker avoids spike rows naturally.
+
+---

@@ -1729,3 +1729,62 @@ reference, so:
 
 End of section 14.
 
+---
+
+## §15 Arm-spike detection — implementation + Test R results (2026-04-08)
+
+### §15.1 What was implemented
+
+Added `adjustForArmSpike` to `DetectionEngine.swift` (lines 953-1044): per-row hRun profiling at the gate column with median-based spike detection (threshold = median × 1.5). If the picker lands on a spike row, shifts detY to the midpoint of the longest contiguous non-spike band. Also added xMin/xMax per row to HRUN_PROFILE logging so the blob's horizontal position is visible.
+
+Pipeline order: picker → spike correction → frameBiasCap clamp → interpolation.
+
+### §15.2 Test R findings (front camera, 11 crossings)
+
+**Normal walks (#1-5):** Natural arm swing during walking creates bigger spikes than intentional arm-lifting. Laps 3 and 5 showed 39-41 px spikes on 15 px median bodies — the arm swings forward and fuses with the torso at the gate. The picker avoided the spike rows naturally; no correction fired.
+
+**Arm-lifted crossings (#6-10):** Raising the arm overhead does NOT fuse it with the torso blob — the profiles are thin (7-8 px median), blobs are small. The arm stays separate in connected components. However, detection fires late because the arm inflates the bounding box, dropping fill_ratio below 0.20 for multiple frames (lap 9: 18 frames of fill_ratio rejects at 0.08-0.19).
+
+**PF comparison:** PF fires at consistent X positions on normal walks (Δx ≤ 15 from our gate) but is highly inconsistent on arm-lifted crossings (userX ranges 62-135). PF also appears to struggle with this pose.
+
+### §15.3 What we know now
+
+- The spike detection mechanism works (flags spike rows, profiles show clear arm signatures) but has never needed to fire because the picker avoids spike rows naturally.
+- The real problem with arm-extended crossings may not be the picker landing on the arm — it may be the fill_ratio prefilter rejecting the inflated bbox, causing late detection.
+- Arm overhead ≠ arm forward. Overhead arms don't fuse with the body; forward-swinging arms do (natural walk arm swing creates bigger fused spikes).
+- PF is also inconsistent on arm crossings, suggesting this is an inherently difficult pose for geometry-based detectors.
+
+### §15.4 Open questions
+
+- Should fill_ratio be computed on a tighter bbox excluding spike rows? Needs more testing — lowering minFillRatio globally would re-introduce hand-swipe false positives.
+- Is the spike detection needed at all if the picker naturally avoids spike rows? More crossing data needed to find a case where it doesn't.
+- Forward arm extension (arm leads through gate) has not been tested with the new profiling. This is the scenario most likely to put the picker ON a spike row.
+
+---
+
+## §15.5 Test S results — tightFill diagnostic confirms arm inflation (2026-04-07)
+
+### What Test S showed
+
+6 arm-raised walk crossings attempted (back-and-forth), 5 detected, 1 completely missed.
+
+**tightFill hypothesis confirmed:** On the 5 frames where `diagTightFill` successfully computed, values were 0.44-0.94 (3-5× higher than raw fillRatio of 0.13-0.19). The arm stretches the bounding box without filling it; trimming spike rows from the effective height would bring fill well above the 0.20 threshold.
+
+**Coverage problem:** tightFill returned -1 on most frames. The function starts from the blob's geometric center (`(minY+maxY)/2`), which may not have a mask pixel at the gate column on fragmented blobs. To use tightFill as a real filter, it needs to start from a row known to intersect the gate (e.g. use the gate-run analysis that already exists in `analyzeGate`).
+
+**Missed crossing:** One L→R crossing (frames 535-567) never fired despite buildup=6. Fill and local_support alternated failures — the blob never satisfied all checks simultaneously. This is the worst outcome: a real crossing that our detector completely drops.
+
+**PF also inconsistent:** Δx ranged from -35 to +50 on arm-raised walks. Both detectors struggle with this pose, consistent with Test R.
+
+### §15.6 Assessment: arm-raised investigation status
+
+Two tests (R and S) now show the same pattern:
+1. Arm-raised walks cause fill_ratio to drop below 0.20 due to bounding-box inflation
+2. tightFill (spike-row-trimmed height) would fix this — confirmed by diagnostic data
+3. PF is equally inconsistent on arm-raised poses (Δx ±50)
+4. Spike detection (picker correction) has never fired — picker avoids spike rows naturally
+
+**Decision point:** Since PF itself struggles with arm-raised crossings, this may not be the right scenario to optimize for under the "replicate PF" principle. The arm-raised fill problem is real and fixable, but PF doesn't solve it either.
+
+**Recommendation:** Park arm-raised as a known limitation shared with PF. Move investigation to the priority issues: (1) forward-lean failure mode, (2) leg-in-front-of-body — these are scenarios where PF succeeds and we need to match it.
+

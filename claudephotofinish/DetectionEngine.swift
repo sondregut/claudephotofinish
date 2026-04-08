@@ -260,7 +260,11 @@ final class DetectionEngine {
             }
             let fillRatio = Float(comp.area) / Float(comp.width * comp.height)
             if fillRatio < minFillRatio {
-                logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d", fillRatio, minFillRatio, comp.area))
+                // §15 diag: what would fill be with a tighter bbox?
+                // Scan gate column for hRun per row, find median, exclude spike rows (>1.5× median)
+                // then compute fill using the trimmed height
+                let tightFill = diagTightFill(comp: comp)
+                logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d tightFill=%.2f", fillRatio, minFillRatio, comp.area, tightFill))
                 continue
             }
             if comp.width > Int(maxAspectRatio * Float(comp.height)) {
@@ -1046,6 +1050,50 @@ final class DetectionEngine {
 
         let adjustedDetY = runTop + bestStart + bestLen / 2
         return SpikeResult(adjustedDetY: adjustedDetY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: true)
+    }
+
+    // MARK: - §15 Diagnostic: tight fill ratio
+    //
+    // Pure logging — computes what the fill ratio would be if the bounding box
+    // excluded spike rows (where hRun > median × 1.5). Returns -1 if not computable.
+    private func diagTightFill(comp: Component) -> Float {
+        let W = processWidth
+        let centerY = (comp.minY + comp.maxY) / 2
+
+        // Find contiguous vertical mask run at gate column containing blob center
+        guard centerY >= 0, centerY < processHeight,
+              maskBuf[centerY * W + gateColumn] != 0 else { return -1 }
+
+        var runTop = centerY
+        while runTop > comp.minY && maskBuf[(runTop - 1) * W + gateColumn] != 0 { runTop -= 1 }
+        var runBot = centerY
+        while runBot < comp.maxY && maskBuf[(runBot + 1) * W + gateColumn] != 0 { runBot += 1 }
+
+        let runHeight = runBot - runTop + 1
+        guard runHeight >= 10 else { return -1 }
+
+        // Compute hRun per row
+        var hRuns = [Int]()
+        for y in runTop...runBot {
+            var lx = gateColumn, rx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[y * W + sx] != 0 { lx = sx; sx -= 1 }
+            sx = gateColumn + 1
+            while sx < W && maskBuf[y * W + sx] != 0 { rx = sx; sx += 1 }
+            hRuns.append(rx - lx + 1)
+        }
+
+        let sorted = hRuns.sorted()
+        let median = sorted[sorted.count / 2]
+        guard median > 0 else { return -1 }
+        let threshold = Float(median) * spikeRatioThreshold
+
+        // Count non-spike rows
+        let nonSpikeRows = hRuns.filter { Float($0) <= threshold }.count
+        guard nonSpikeRows > 0 else { return -1 }
+
+        // Tight fill = area / (width × non-spike-height)
+        return Float(comp.area) / Float(comp.width * nonSpikeRows)
     }
 
     // MARK: - Diagnostic: per-column gate stats
