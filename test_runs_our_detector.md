@@ -3282,3 +3282,156 @@ PF Δx range: -35 to +50. Highly inconsistent — corroborates Test R finding th
 5. **Spike detection still never fired** — picker avoids spike rows naturally.
 
 ---
+
+## Run 2026-04-08 Test T — front camera, arm-raised walks + leans with fill_rescue active
+
+**Setup:** front camera, 10 crossings (back-and-forth). Laps 1-3, 5-6, 8: arm raised above head. Lap 4: ignore (user note). Lap 7: arm raised — late/wrong detection. Lap 9: lean with arms stretched out. Lap 10: lean with arms behind. PF running in parallel on select laps.
+
+**Algorithm state:** fill_rescue active (computeTightFill fallback + effectiveHeight for local_support need), spikeRatioThreshold=1.5, localSupportFraction=0.25, minFillRatio=0.20.
+
+### Detection summary
+
+| Lap | frame | blob | fill | buildup | dir | rescued? | trimmedH | tightFill | User notes |
+|-----|-------|------|------|---------|-----|----------|----------|-----------|------------|
+| 1 | 94 | 149×237 | 0.22 | 1 | R>L | no | — | — | hand above |
+| 2 | 161 | 134×211 | 0.17 | 1 | R>L | **YES** | 68 | 0.51 | hand above |
+| 3 | 254 | 121×250 | 0.25 | 3 | R>L | no | — | — | hand above |
+| 4 | 499 | 89×238 | 0.23 | 1 | L>R | no | — | — | ignore |
+| 5 | 638 | 134×198 | 0.21 | 1 | L>R | no | — | — | hand above |
+| 6 | 721 | 118×188 | 0.14 | 2 | R>L | **YES** | 13 | 1.96 | hand above + movement; "detected arm not body" |
+| 7 | 807 | 114×146 | 0.30 | **12** | R>L | no | — | — | "waited too long, detected hand behind body" |
+| 8 | 894 | 131×176 | 0.23 | 7 | R>L | no | — | — | hand above |
+| 9 | 965 | 152×203 | 0.18 | 9 | L>R | **YES** | 9 | 3.99 | lean, arms stretched out |
+| 10 | 1051 | 135×196 | 0.27 | 3 | R>L | no | — | — | lean, arms behind |
+
+### FILL_RESCUE activations (all frames, including non-detection)
+
+| frame | fill | tightFill | trimmedH | outcome |
+|-------|------|-----------|----------|---------|
+| 161 | 0.17 | 0.51 | 68 | **DETECTED** (lap 2) |
+| 430 | 0.09 | 1.49 | 7 | no_gate_intersection |
+| 625 | 0.16 | 2.04 | 12 | local_support run=13 need=25 |
+| 627 | 0.11 | 1.38 | 14 | local_support run=16 need=25 |
+| 719 | 0.19 | 1.52 | 23 | no_gate_intersection |
+| 720 | 0.13 | 1.17 | 22 | local_support run=21 need=25 |
+| 721 | 0.14 | 1.96 | 13 | **DETECTED** (lap 6) |
+| 799 | 0.19 | 1.88 | 11 | local_support run=12 need=25 |
+| 965 | 0.18 | 3.99 | 9 | **DETECTED** (lap 9) |
+
+### PF comparison (USER_MARK = PF detection position)
+
+| Lap | Our gate X | PF userX | Δx | Notes |
+|-----|------------|----------|----|-------|
+| 2 | 90 | 83 | -7 | close match |
+| 6 | 90 | 130 | +40 | PF fired much later |
+| 7 | 90 | 138 | +48 | PF fired much later |
+| 9 | 90 | 124/119 | +32 | PF fired later |
+
+### Observations
+
+1. **FILL_RESCUE is working:** 3 of 9 real crossings (laps 2, 6, 9) were rescued by tightFill fallback. Without rescue, these would have been fill_ratio rejects. Compared to Test S (1 miss in 6), all 9 detected here.
+
+2. **Lap 7 problem — buildup=12:** The worst crossing. Frames 796-806 show alternating local_support failures (run=22-34 vs need=36-46). FILL_RESCUE fired at frame 799 (trimmedH=11, need=25) but run was only 12, still failing. The body crossed while the detector was still building up; by frame 807 the blob was behind the body (fill=0.30, buildup=12). User confirms: "detected hand behind body after body had crossed."
+
+3. **Lap 6 — "detected arm not body":** FILL_RESCUE with trimmedH=13, detY=129. HRUN_PROFILE shows rows 121-126 have hRun 17-20 (arm spike rows), rows 127+ have hRun 11-15 (body). The picker at detY=129 is actually at the body, but the user noted it "detected arm not body" — this may refer to the thumbnail showing the arm motion rather than the picker Y position.
+
+4. **tightFill > 1.0 is common:** Values of 1.17-3.99 occur when trimmedH is very small (7-23 rows). tightFill = area / (width × trimmedH) — with full component area divided by a tiny trimmed height, it inflates beyond 1.0. Not geometrically meaningful as a "ratio" but still passes the 0.20 threshold correctly.
+
+5. **Many tightFill=-1.00 remain:** Long sequences of fill_ratio rejects with tightFill=-1.00 (e.g., frames 336-357, 458-488, 552-583). The outward-scan anchor fix helps but many blobs still have no mask pixel at the gate column. These blobs likely don't intersect the gate densely enough to be real crossings anyway.
+
+6. **Buildup is high on several laps:** Lap 7 (12), lap 8 (7), lap 9 (9). The fill_rescue helps laps that would have been missed entirely, but many arm-raised crossings still require multiple frames of buildup before all checks align.
+
+7. **Frame-absolute floor dominates need:** In most rescue cases, need=25 (from H×0.08 = 320×0.08 = 25.6), not from trimmedH×0.25. The effectiveHeight threading only matters when trimmedH×0.25 > 25, i.e., trimmedH > 100. For small trimmedH values (7-23), the floor dominates. This means the effectiveHeight fix has minimal impact — the real rescue is the tightFill fill_ratio bypass.
+
+---
+
+## Run 2026-04-10 Test U — front camera, normal walks + hand-in-front crossings
+
+**Setup:** front camera, dark shirt, exp≈2.5–3.7ms, iso=27–31, cap=4ms. 9 crossings
+back-and-forth at walking pace. Laps 1–6: normal walks. Laps 7–9: hand held in front
+of body at chest/stomach height while crossing. PF running in parallel — USER_MARK taps
+placed where PF's vertical line appeared on our thumbnails.
+
+**Algorithm state:** fill_rescue active (tightFill fallback + effectiveHeight),
+spikeRatioThreshold=1.5, localSupportFraction=0.25, minFillRatio=0.20.
+
+### Detection summary
+
+| Lap | frame | blob | fill | buildup | dir | hRun | detY | rawDetY | type |
+|-----|-------|------|------|---------|-----|------|------|---------|------|
+| 1 | 99 | 61×150 | 0.37 | 4 | L>R | 6 | 168 | 168 | normal |
+| 2 | 267 | 180×153 | 0.26 | 1 | L>R | 75 | 121 | 121 | normal (wide anomaly) |
+| 3 | 474 | 104×229 | 0.33 | 5 | R>L | 14 | 173 | 173 | normal |
+| 4 | 600 | 104×236 | 0.39 | 5 | R>L | 16 | 168 | 168 | normal |
+| 5 | 834 | 120×248 | 0.37 | 3 | L>R | 15 | 161 | 161 | normal |
+| 6 | 922 | 121×243 | 0.37 | 4 | R>L | 16 | 176 | 181 | normal |
+| 7 | 1030 | 180×269 | 0.24 | 3 | L>R | 11 | 163 | 163 | hand front |
+| 8 | 1118 | 113×217 | 0.33 | 8 | L>R | 17 | 167 | 167 | hand front |
+| 9 | 1196 | 158×241 | 0.25 | 4 | L>R | 13 | 173 | 173 | hand front |
+
+All 9 detected. No misses, no false positives.
+
+### USER_MARK Δy table (user tap vs our picker; not PF ground truth — PF shows X only)
+
+| Lap | Type | detY | userY | Δy | PF userX | Our gateX | PF Δx |
+|-----|------|------|-------|----|----------|-----------|-------|
+| 1 | normal | 168 | 154 | −14 | 91 | 90 | +1 |
+| 2 | normal (wide) | 121 | — | — | — | — | — |
+| 3 | normal | 173 | — | — | — | — | — |
+| 4 | normal | 168 | 151 | −17 | 119 | 90 | +29 |
+| 5 | normal | 161 | 160 | −1 | 91 | 90 | +1 |
+| 6 | normal | 176 | 175 | −1 | 98 | 90 | +8 |
+| 7 | hand front | 163 | 147 | −16 | 93 | 90 | +3 |
+| 8 | hand front | 167 | 151 | −16 | 78 | 90 | −12 |
+| 9 | hand front | 173 | 144 | −29 | 91 | 90 | +1 |
+
+### FILL_RESCUE activations
+
+| frame | fill | tightFill | trimmedH | outcome |
+|-------|------|-----------|----------|---------|
+| 266 | 0.19 | 1.00 | 24 | aspect_ratio reject (→ lap 2 on next frame) |
+| 1021 | 0.14 | 1.98 | 11 | local_support reject (lap 7 precursor) |
+| 1024 | 0.13 | 3.53 | 10 | local_support reject |
+| 1025 | 0.17 | 4.00 | 12 | local_support reject |
+| 1109 | 0.15 | 2.07 | 14 | local_support reject (lap 8 precursor) |
+| 1111 | 0.15 | 3.51 | 10 | local_support reject |
+| 1112 | 0.15 | 2.30 | 14 | local_support reject |
+| 1190 | 0.18 | 3.83 | 11 | local_support reject (lap 9 precursor) |
+
+### Observations
+
+1. **fill_rescue regression check passes.** Normal walks (laps 1–6) all detected with
+   no regressions. Hand-in-front (laps 7–9) all detected. This satisfies the §15.7
+   "test normal walks + hand swipes" gate. (Hand swipes as a false-positive test is
+   still pending but is lower priority.)
+
+2. **hRun does not separate pose classes.** Normal: hRun = 6, 75, 14, 16, 15, 16.
+   Hand-in-front: hRun = 11, 17, 13. Both classes overlap. This is consistent with
+   Test P's conclusion: do not add an hRun filter.
+
+3. **Lap 2 anomaly — full-width blob 180×153, hRun=75.** The only crossing that
+   triggered aspect-ratio rejects on the preceding frame (180×129, ratio=1.4) before
+   firing with 180×153 (ratio=1.18). HRUN_PROFILE shows rows 102–141 at 60–86px wide
+   (nearly full frame). Picker landed at detY=121 = 43% down from blob top (y=55..207).
+   Likely a forward-lean crossing at close camera distance — user called it "normal" and
+   did not flag it. No USER_MARK placed.
+
+4. **Lap 7 also full-width blob (180×269), hRun=11.** The hand extended the horizontal
+   footprint to the frame edge but detection still fired with buildup=3. Multiple
+   FILL_RESCUE activations (frames 1021/1024/1025) in the preceding buildup frames show
+   the hand was dropping fill below 0.20. tightFill rescue enabled eventual detection.
+
+5. **Lap 8 worst buildup (8).** FILL_RESCUE at frames 1109/1111/1112 shows alternating
+   rescues; local_support fell short each time (run=13–16 vs need=25). Detected at
+   frame 1118 once a clean gate run appeared. Hand-in-front at chest height appears to
+   create more fragmentation than arm overhead.
+
+6. **Δy pattern consistent with §11/§12 picker bias.** Laps 5 and 6 (tallest blobs,
+   248/243px) show Δy=−1 (near-perfect). Shorter/wider blobs (laps 1, 4, 7–9) show
+   Δy = −14 to −29. Picker lands lower than user expects on blobs where the gate run
+   is dominated by the leg stripe. This is the known §12.5 failure mode.
+
+7. **PF Δx tight on hand-in-front (−12 to +3).** Contrast with arm-raised-overhead in
+   Tests R/S (Δx up to ±50). Hand in front of body does not destabilize PF's X timing.
+
+---

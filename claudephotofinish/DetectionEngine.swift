@@ -5,6 +5,17 @@ import UIKit
 import ImageIO
 import Accelerate
 
+// MARK: - Picker Mode
+//
+// Controls how detectionY is chosen from the gate-band mask.
+// The fire condition (local_support) always uses the full-blob longest run;
+// only the Y pick changes. See detector_hypotheses.md §12.5.
+enum PickerMode: String, CaseIterable, Equatable {
+    case longestRun    = "Longest"  // current: midpoint of densest vertical run (whole blob)
+    case topThird      = "Top ⅓"   // midpoint of densest run in top ⅓ of blob (relative, hypothesis A)
+    case absoluteFloor = "Floor"    // densest run above a fixed frame-Y floor; no fire if nothing above floor (hypothesis B)
+}
+
 // MARK: - Detection Result
 
 struct DetectionResult {
@@ -81,6 +92,10 @@ final class DetectionEngine {
     private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let spikeRatioThreshold: Float = 1.5 // §15: arm-spike rejection — if hRun at detY > median × this, re-pick
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
+
+    // §12.5 A/B picker toggle — change at runtime from the tuning panel
+    var pickerMode: PickerMode = .longestRun
+    var absolutePickerFloor: Int = 160           // only used when pickerMode == .absoluteFloor
 
     // Gate
     var gateColumn: Int { processWidth / 2 }
@@ -259,13 +274,17 @@ final class DetectionEngine {
                 continue
             }
             let fillRatio = Float(comp.area) / Float(comp.width * comp.height)
+            var trimmedHeight: Int? = nil
             if fillRatio < minFillRatio {
-                // §15 diag: what would fill be with a tighter bbox?
-                // Scan gate column for hRun per row, find median, exclude spike rows (>1.5× median)
-                // then compute fill using the trimmed height
-                let tightFill = diagTightFill(comp: comp)
-                logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d tightFill=%.2f", fillRatio, minFillRatio, comp.area, tightFill))
-                continue
+                // §15: arm inflation drops fill — try tightFill excluding spike rows
+                let (tightFill, trimmedH) = computeTightFill(comp: comp)
+                if tightFill < minFillRatio {
+                    logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d tightFill=%.2f", fillRatio, minFillRatio, comp.area, tightFill))
+                    continue
+                }
+                // Blob rescued by tightFill — use trimmedH for local_support need
+                trimmedHeight = trimmedH
+                print(String(format: "[FILL_RESCUE] frame=%d fill=%.2f tightFill=%.2f trimmedH=%d", frameIndex, fillRatio, tightFill, trimmedH))
             }
             if comp.width > Int(maxAspectRatio * Float(comp.height)) {
                 logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
@@ -276,7 +295,8 @@ final class DetectionEngine {
                 continue
             }
 
-            if let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax) {
+            let effectiveH = trimmedHeight ?? comp.height
+            if let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax, effectiveHeight: effectiveH) {
                 anyBlobAtGate = true
                 if analysis.hasQualifyingSlice {
                     candidateCount += 1
@@ -284,7 +304,7 @@ final class DetectionEngine {
                         best = (comp, analysis.detectionY, analysis.maxVerticalRun, analysis.winWindowStart)
                     }
                 } else {
-                    let need = max(3, Int(Float(comp.height) * localSupportFraction), frameAbsMin)
+                    let need = max(3, Int(Float(effectiveH) * localSupportFraction), frameAbsMin)
                     logReject("local_support",
                               detail: "run=\(analysis.maxVerticalRun) need=\(need)")
                 }
@@ -429,8 +449,14 @@ final class DetectionEngine {
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
         let spikeTag = spikeResult.corrected ? " SPIKE_CORRECTED" : ""
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d%@",
-                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection, spikeTag))
+        let pickerTag: String
+        switch pickerMode {
+        case .longestRun:    pickerTag = ""
+        case .topThird:      pickerTag = " picker=topThird"
+        case .absoluteFloor: pickerTag = " picker=floor\(absolutePickerFloor)"
+        }
+        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d%@%@",
+                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection, spikeTag, pickerTag))
 
         // §15 instrumentation: per-row hRun profile at the gate column
         if !spikeResult.profile.isEmpty {
@@ -859,12 +885,15 @@ final class DetectionEngine {
 
     private let sliceWidth = 3 // multi-column window for local support scoring
 
-    private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
+    private func analyzeGate(comp: Component, gMin: Int, gMax: Int, effectiveHeight: Int? = nil) -> GateAnalysis? {
         let W = processWidth, H = processHeight
-        let minSupport = max(3, Int(Float(comp.height) * localSupportFraction),
+        let heightForNeed = effectiveHeight ?? comp.height
+        let minSupport = max(3, Int(Float(heightForNeed) * localSupportFraction),
                              Int(Float(H) * minGateHeightFraction))
 
-        // Compute best vertical run for each gate column
+        // Compute best vertical run for each gate column (full blob range).
+        // colRuns drives the local_support fire condition regardless of pickerMode.
+        // colMids is the fallback Y pick for longestRun mode.
         let columns = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
         guard !columns.isEmpty else { return nil }
 
@@ -891,6 +920,63 @@ final class DetectionEngine {
             colMids[ci] = bestMid
         }
 
+        // §12.5 Picker mode: compute colPickMids — the Y values used for detectionY.
+        // For longestRun (current), colPickMids == colMids.
+        // For topThird / absoluteFloor, restrict the Y scan to bias detectionY upward.
+        var colPickMids = colMids
+
+        if pickerMode != .longestRun {
+            // Determine the upper Y ceiling for the restricted scan
+            let ceilY: Int
+            switch pickerMode {
+            case .longestRun:
+                ceilY = comp.maxY  // unreachable
+            case .topThird:
+                ceilY = comp.minY + comp.height / 3
+            case .absoluteFloor:
+                // For floor mode, refuse to fire entirely if no gate pixel is above the floor.
+                // This tests hypothesis B: PF ignores blobs entirely in the lower frame.
+                let floor = absolutePickerFloor
+                // Guard: if the blob is entirely at or below the floor, refuse to fire.
+                let floorScanTop = comp.minY
+                let floorScanBot = min(floor - 1, comp.maxY)
+                guard floorScanBot >= floorScanTop else {
+                    return GateAnalysis(hasQualifyingSlice: false, detectionY: comp.minY,
+                                        maxVerticalRun: 0, winWindowStart: -1)
+                }
+                let hasAboveFloor = columns.contains { gx in
+                    (floorScanTop...floorScanBot).contains { y in
+                        maskBuf[y * W + gx] != 0
+                    }
+                }
+                guard hasAboveFloor else {
+                    return GateAnalysis(hasQualifyingSlice: false, detectionY: comp.minY,
+                                        maxVerticalRun: 0, winWindowStart: -1)
+                }
+                ceilY = floor - 1
+            }
+
+            let scanTop = comp.minY
+            let scanBot = min(ceilY, comp.maxY)
+            if scanTop <= scanBot {
+                for (ci, gx) in columns.enumerated() {
+                    var runStart = -1, runLen = 0, best = 0, bestMid = 0
+                    for y in scanTop...scanBot {
+                        if maskBuf[y * W + gx] != 0 {
+                            if runStart < 0 { runStart = y }
+                            runLen += 1
+                        } else {
+                            if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
+                            runStart = -1; runLen = 0
+                        }
+                    }
+                    if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
+                    // Only override if we found pixels in the restricted range
+                    if best > 0 { colPickMids[ci] = bestMid }
+                }
+            }
+        }
+
         // Determine scan direction from leading edge
         let compCenterX = (comp.minX + comp.maxX) / 2
         let movingRight = compCenterX < gateColumn
@@ -915,12 +1001,13 @@ final class DetectionEngine {
         var overallBestWi = -1
 
         for wi in windowIndices {
-            // Average run across all columns in this window
+            // Average run across all columns in this window.
+            // colRuns → fire decision; colPickMids → Y placement.
             var sumRun = 0
             var sumMid = 0
             for j in wi..<(wi + sw) {
                 sumRun += colRuns[j]
-                sumMid += colMids[j]
+                sumMid += colPickMids[j]
             }
             let avgRun = sumRun / sw
 
@@ -1052,25 +1139,42 @@ final class DetectionEngine {
         return SpikeResult(adjustedDetY: adjustedDetY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: true)
     }
 
-    // MARK: - §15 Diagnostic: tight fill ratio
+    // MARK: - §15 Tight fill: fill ratio excluding arm-spike rows
     //
-    // Pure logging — computes what the fill ratio would be if the bounding box
-    // excluded spike rows (where hRun > median × 1.5). Returns -1 if not computable.
-    private func diagTightFill(comp: Component) -> Float {
+    // When a raised arm inflates the bounding box, raw fill_ratio drops below
+    // threshold even though the torso is solid. This function computes fill using
+    // only non-spike rows (hRun ≤ median × 1.5) and returns the trimmed row count
+    // so analyzeGate can use it for local_support need.
+    //
+    // Returns (tightFill, trimmedHeight). Returns (-1, 0) if not computable.
+    private func computeTightFill(comp: Component) -> (Float, Int) {
         let W = processWidth
+
+        // Find any mask pixel at the gate column within the blob's vertical range.
+        // Scan from the vertical center outward to maximize chance of hitting the
+        // main body run (not a thin arm fragment).
         let centerY = (comp.minY + comp.maxY) / 2
+        var seedY = -1
+        for offset in 0...(comp.maxY - comp.minY) {
+            let yUp = centerY - offset
+            let yDown = centerY + offset
+            if yUp >= comp.minY && maskBuf[yUp * W + gateColumn] != 0 {
+                seedY = yUp; break
+            }
+            if yDown <= comp.maxY && maskBuf[yDown * W + gateColumn] != 0 {
+                seedY = yDown; break
+            }
+        }
+        guard seedY >= 0 else { return (-1, 0) }
 
-        // Find contiguous vertical mask run at gate column containing blob center
-        guard centerY >= 0, centerY < processHeight,
-              maskBuf[centerY * W + gateColumn] != 0 else { return -1 }
-
-        var runTop = centerY
+        // Expand up/down from seed to find contiguous gate-column run
+        var runTop = seedY
         while runTop > comp.minY && maskBuf[(runTop - 1) * W + gateColumn] != 0 { runTop -= 1 }
-        var runBot = centerY
+        var runBot = seedY
         while runBot < comp.maxY && maskBuf[(runBot + 1) * W + gateColumn] != 0 { runBot += 1 }
 
         let runHeight = runBot - runTop + 1
-        guard runHeight >= 10 else { return -1 }
+        guard runHeight >= 10 else { return (-1, 0) }
 
         // Compute hRun per row
         var hRuns = [Int]()
@@ -1085,15 +1189,15 @@ final class DetectionEngine {
 
         let sorted = hRuns.sorted()
         let median = sorted[sorted.count / 2]
-        guard median > 0 else { return -1 }
+        guard median > 0 else { return (-1, 0) }
         let threshold = Float(median) * spikeRatioThreshold
 
         // Count non-spike rows
         let nonSpikeRows = hRuns.filter { Float($0) <= threshold }.count
-        guard nonSpikeRows > 0 else { return -1 }
+        guard nonSpikeRows > 0 else { return (-1, 0) }
 
-        // Tight fill = area / (width × non-spike-height)
-        return Float(comp.area) / Float(comp.width * nonSpikeRows)
+        let tightFill = Float(comp.area) / Float(comp.width * nonSpikeRows)
+        return (tightFill, nonSpikeRows)
     }
 
     // MARK: - Diagnostic: per-column gate stats

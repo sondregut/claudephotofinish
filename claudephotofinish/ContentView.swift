@@ -607,6 +607,7 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 liveReadoutSection
+                pickerModeSection
                 modeSection
                 if camera.isManualExposure {
                     manualExposureSection
@@ -621,6 +622,46 @@ struct ContentView: View {
                     Button("Done") { showTuning = false }
                 }
             }
+        }
+    }
+
+    // MARK: - Picker Mode Section (§12.5 A/B test)
+
+    private var pickerModeSection: some View {
+        Section("Picker mode (§12.5 A/B)") {
+            Picker("Mode", selection: $camera.pickerMode) {
+                ForEach(PickerMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            if camera.pickerMode == .absoluteFloor {
+                HStack {
+                    Text("Floor Y")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("\(camera.absolutePickerFloor)")
+                        .font(.system(.body, design: .monospaced))
+                }
+                Slider(
+                    value: Binding(
+                        get: { Double(camera.absolutePickerFloor) },
+                        set: { camera.absolutePickerFloor = Int($0) }
+                    ),
+                    in: 80...280, step: 10
+                ) {
+                    Text("Floor Y")
+                } minimumValueLabel: {
+                    Text("80").font(.caption2)
+                } maximumValueLabel: {
+                    Text("280").font(.caption2)
+                }
+            }
+
+            Text("Longest: current (picks densest/lowest run). Top ⅓: pick from top third of blob (hypothesis A — relative). Floor: only fire if blob top is above frame-Y floor (hypothesis B — absolute). See §12.5.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
         }
     }
 

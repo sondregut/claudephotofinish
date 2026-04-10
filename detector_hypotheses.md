@@ -1788,3 +1788,96 @@ Two tests (R and S) now show the same pattern:
 
 **Recommendation:** Park arm-raised as a known limitation shared with PF. Move investigation to the priority issues: (1) forward-lean failure mode, (2) leg-in-front-of-body — these are scenarios where PF succeeds and we need to match it.
 
+---
+
+## §15.7 Test T results — fill_rescue active (2026-04-08)
+
+### What Test T showed
+
+9 real crossings (excluding lap 4 "ignore"), all detected. FILL_RESCUE activated on 3 crossings (laps 2, 6, 9) that would have been fill_ratio rejects without the fix. This is a clear improvement over Test S (1 miss in 6).
+
+### Key finding: frame-absolute floor dominates, not effectiveHeight
+
+The effectiveHeight threading into analyzeGate had minimal impact. In most rescue cases, the local_support need is 25 (from H×0.08 = 320×0.08 floor), not from trimmedH×0.25. For trimmedH values of 7-23, trimmedH×0.25 = 1-5, well below the floor. The effectiveHeight fix only matters when trimmedH > 100, which never occurred.
+
+**The real fix is the tightFill fill_ratio bypass** — it lets arm-inflated blobs past the fill check. The effectiveHeight change is harmless but largely inert.
+
+### Remaining problems
+
+1. **Lap 7 (buildup=12):** Body crossed while detector was still building up. FILL_RESCUE fired at frame 799 (trimmedH=11) but gate run was only 12 vs need=25. The blob that eventually detected (frame 807) was the arm/hand behind the body, not the torso crossing. This is a timing failure, not a filter failure.
+
+2. **High buildup on several laps:** Laps 7(12), 8(7), 9(9). The fill_rescue helps blobs that would have been missed entirely, but arm-raised crossings still require multiple frames before all checks align. This is consistent with PF also being inconsistent on arm-raised poses (Δx up to +48).
+
+3. **tightFill values > 1.0:** Common when trimmedH is small. Not geometrically meaningful but passes the threshold correctly. Could add a cap at 1.0 for cleaner logging but functionally irrelevant.
+
+### Assessment
+
+The fill_rescue fix is a net positive: 9/9 detected vs 5/6 in Test S. The fix primarily helps through the tightFill fill_ratio bypass. The effectiveHeight component is largely inert due to the frame-absolute floor dominating.
+
+**Next:** Need to test normal walks and hand swipes to verify no regressions before keeping this code.
+
+---
+
+## §16 Test U (2026-04-10) — fill_rescue regression check + hand-in-front data
+
+### §16.1 What Test U tested
+
+Front camera, 9 crossings: laps 1–6 normal walks, laps 7–9 hand held in front of body
+(chest/stomach height) while crossing. Goal: satisfy the §15.7 "test normal walks to
+verify no regressions" gate before considering fill_rescue final.
+
+### §16.2 What Test U showed
+
+**All 9 detected.** The §15.7 regression gate is satisfied for normal walks. No false
+positives appeared between crossings.
+
+**fill_rescue contributing on hand-in-front crossings.** Eight FILL_RESCUE activations
+across the buildup frames for laps 2/7/8/9. tightFill values of 1.0–4.0 on frames where
+raw fill was 0.13–0.19. The mechanism is working as designed.
+
+**hRun distribution further confirms no-filter decision.** Normal walks: hRun = 6–75.
+Hand-in-front: hRun = 11–17. Classes overlap completely. Test P already closed this
+question; Test U is additional confirmation.
+
+**Δy bias unchanged.** Tall blobs (h≥243px) land detY within 1px of user tap. Shorter
+or wider blobs show Δy = −14 to −29 (picker too low). This is the §12.5 leg-stripe
+picker failure mode, unchanged since it was characterized. No new information.
+
+**PF Δx on hand-in-front is tight (−12 to +3).** Significantly tighter than arm-raised-
+overhead (±50 in Tests R/S). Hand-in-front does not disrupt PF's gate timing the way
+an arm overhead does.
+
+**Lap 2 anomaly: 180×153 full-width blob, hRun=75.** User called it a normal crossing.
+The full-frame width and high hRun suggest a leaned or close-proximity crossing. Picker
+landed at 43% down from blob top (detY=121). No regression from this — the detector
+handled it correctly. Worth noting because it's the only data point where our picker
+landed in the upper portion of a wide blob without the characteristic Δy=−14..−29.
+
+### §16.3 What Test U did NOT resolve
+
+- **Hand swipes (flat horizontal swipes) as false positives** — this is the remaining
+  regression test that §15.7 originally flagged. Lower priority because (a) no hand
+  swipe false positives have appeared in recent tests and (b) tightFill rescue only
+  activates when fill <0.20, and hand swipes passed fill≥0.25 in earlier tests.
+  Still an open check but not blocking.
+- **The §12.5 picker bias** — Δy = −14 to −29 on most crossings remains unaddressed.
+  This is expected; the fix is gated on §12.7.
+
+### §16.4 Re-ranked next-action queue (post Test U)
+
+1. **§12.7 vertical-stick test.** Unchanged. Still the top priority. Test U provides no
+   new evidence bearing on the relative-vs-absolute question. The picker fix cannot be
+   designed until §12.7 settles hypothesis A/B/C.
+2. **Hand-swipe false-positive regression on fill_rescue.** Lower priority. No urgency
+   given zero hand-swipe false positives in recent sessions. Can be folded into the
+   next general-purpose test session if needed.
+3. **Everything else** — unchanged from §14.4.
+
+**fill_rescue is considered validated for normal walks and hand-in-front crossings.
+No code changes needed from this test.**
+
+**Next physical test: §12.7 vertical-stick test.** See §12.7 for the full protocol.
+Equipment: any rod ≥50cm. PF only — our app not needed. Three variations (stick top
+at head/chest height, waist/knee height, knee/shin height), 2–3 reps each. Record:
+PF fired Y/N, and where the line landed on the stick (top/middle/bottom).
+

@@ -43,6 +43,14 @@ final class CameraManager: NSObject, ObservableObject {
         didSet { if isManualExposure { applyExposureSettings() } }
     }
 
+    // §12.5 A/B picker toggle — mirrored from engine so the tuning panel can bind to it
+    @Published var pickerMode: PickerMode = .longestRun {
+        didSet { engine.pickerMode = pickerMode }
+    }
+    @Published var absolutePickerFloor: Int = 160 {
+        didSet { engine.absolutePickerFloor = absolutePickerFloor }
+    }
+
     // Live readouts sampled from the capture queue. Updated ~once/sec to avoid
     // thrashing SwiftUI on the main thread.
     @Published var currentExposureMs: Double = 0
