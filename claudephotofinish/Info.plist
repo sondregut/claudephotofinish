@@ -4,8 +4,14 @@
 <dict>
 	<key>NSCameraUsageDescription</key>
 	<string>Camera access is needed to detect athletes crossing the gate line for sprint timing.</string>
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

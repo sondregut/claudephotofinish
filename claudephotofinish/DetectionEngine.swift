@@ -25,7 +25,10 @@ struct DetectionResult {
     let dBefore: Float                  // pixels from old leading edge to gate
     let dAfter: Float                   // pixels from gate to new leading edge
     let movingLeftToRight: Bool
-    let gateY: Int
+    let gateY: Int                      // §19 torsoGateY — drives timing, interpolation, and display
+    let rawGateY: Int                   // §19 analyzeGate picker output — debug only
+    let triggerHRun: Int                // §19 hRun at torsoGateY
+    let triggerBandRows: Int            // §19 rows in the 7-row window meeting torsoMinHRun
     let componentBounds: CGRect
     let thumbnailData: Data?
     let isLandscapeBuffer: Bool
@@ -79,7 +82,11 @@ final class DetectionEngine {
 
     // Thresholds (from spec)
     private let diffThreshold: UInt8    = 15
-    private let heightFraction: Float   = 0.33
+    // Lowered 2026-04-11 from 0.33 → 0.30 to match Photo Finish's documented
+    // global size behavior (§19 torso-gate fix). The Stage 2 torso gate below
+    // carries the burden of rejecting non-body blobs, so the global size
+    // prefilter can afford to be slightly more permissive.
+    private let heightFraction: Float   = 0.30
     private let widthFraction:  Float   = 0.08
     // Reverted 2026-04-07 from 0.15 → 0.25 after the post-Test-N cross-tab
     // in test_runs_our_detector.md showed that 5 of 7 Test N elbow leakers
@@ -89,9 +96,34 @@ final class DetectionEngine {
     private let localSupportFraction: Float = 0.25
     private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
     private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
-    private let frameBiasCap: Float = 0.55       // §12.5 hypothesis B: clamp detY to top 55% of frame
     private let spikeRatioThreshold: Float = 1.5 // §15: arm-spike rejection — if hRun at detY > median × this, re-pick
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
+
+    // §19 Torso-gate constants (Test X fix, 2026-04-11). The gate fire now
+    // requires a torso-like band at the gate column — not just any vertical
+    // run of motion. These replace the old post-hoc frameBiasCap clamp which
+    // moved the visible marker but never moved the fire frame.
+    private let torsoMinHRun: Int = 18
+    private let torsoBandRows: Int = 5
+    private let torsoWindowRows: Int = 7
+    // §19 search ceiling: fraction used for BOTH the frame-relative and
+    // blob-relative upper-portion ceilings in `pickTorsoGateRow`. The
+    // effective searchMaxY is `max(frameCeiling, blobCeiling)` so tall
+    // top-of-frame blobs (Test W sprinter) keep their old scan range
+    // while lower-frame blobs (Test Y/Z hand swipe) unlock the upper
+    // portion of the blob itself. Matches PF's model per 2026-04-11
+    // user feedback: "fires higher up on the blob, avoiding legs."
+    private let torsoSearchMaxFrac: Float = 0.55
+
+    // §19 Full-frame flash guard: reject blobs that cover nearly the entire
+    // frame with high fill. Photo Finish has no such pathology because its
+    // exposure control differs; for us this catches the Test X #14 "auto-
+    // exposure snap" pattern where every pixel changes at once and the
+    // connected component becomes the whole frame.
+    private let flashGuardCoverage: Float = 0.55   // blob area / frame area
+    private let flashGuardFill: Float = 0.70       // blob area / (w*h)
+    private let flashGuardWFrac: Float = 0.80      // blob width / frame width
+    private let flashGuardHFrac: Float = 0.80      // blob height / frame height
 
     // §12.5 A/B picker toggle — change at runtime from the tuning panel
     var pickerMode: PickerMode = .longestRun
@@ -119,6 +151,13 @@ final class DetectionEngine {
     // spikes (hand swipes) from gradual buildup (body crossings).
     private var gateBuildup = 0
 
+    // §17.4 H2 diagnostic: ring buffer of max candidate effectiveH for the last
+    // 2 frames (index 0 = frame-2, index 1 = frame-1). Combined with the current
+    // frame's max we compute a 3-frame min for LS_COUNTERFACT logging. Pure
+    // instrumentation — does not affect detector behavior.
+    private var candidateHHistory: [Int] = [0, 0]
+    private var currentFrameMaxCandidateH: Int = 0
+
     // MARK: Init
 
     init() {
@@ -139,11 +178,36 @@ final class DetectionEngine {
         lastDetectionRealElapsed = nil
         gateOccupied = false
         gateBuildup = 0
+        candidateHHistory = [0, 0]
+        currentFrameMaxCandidateH = 0
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
         lastFullW = 0
-        print("[ENGINE] started, process=\(processWidth)x\(processHeight)")
+        slog("[ENGINE] started, process=\(processWidth)x\(processHeight)")
+        logEngineConfig()
+    }
+
+    /// Emit the full detection-engine configuration as a single grep-friendly
+    /// line. Fires on every `start()` so each test run in the log buffer is
+    /// self-describing — you can tell from the log alone which picker mode,
+    /// thresholds, and geometry constants were in effect.
+    private func logEngineConfig() {
+        let pickerDesc: String
+        switch pickerMode {
+        case .longestRun:    pickerDesc = "longestRun"
+        case .topThird:      pickerDesc = "topThird"
+        case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
+        }
+        slog(String(format:
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f minFill=%.2f maxAspect=%.1f torsoMinHRun=%d torsoBand=%d/%d torsoMaxFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs",
+            pickerDesc, isFrontCamera ? "front" : "back",
+            processWidth, processHeight, gateColumn, gateBandHalf,
+            Int(diffThreshold), heightFraction, widthFraction,
+            localSupportFraction, minFillRatio, maxAspectRatio,
+            torsoMinHRun, torsoBandRows, torsoWindowRows, torsoSearchMaxFrac,
+            spikeRatioThreshold, warmupFrames, cooldown
+        ))
     }
 
     func stop() {
@@ -194,7 +258,7 @@ final class DetectionEngine {
             scaleX = max(srcW / processWidth, 1)
             scaleY = max(srcH / processHeight, 1)
             hasPrevious = false  // don't diff across camera switches
-            print("[INIT] buffer=\(fullW)x\(fullH) bpr=\(bpr) landscape=\(isLandscape) process=\(processWidth)x\(processHeight) scaleX=\(scaleX) scaleY=\(scaleY)")
+            slog("[INIT] buffer=\(fullW)x\(fullH) bpr=\(bpr) landscape=\(isLandscape) process=\(processWidth)x\(processHeight) scaleX=\(scaleX) scaleY=\(scaleY)")
         }
 
         // Extract grayscale into current buffer
@@ -259,10 +323,22 @@ final class DetectionEngine {
         let gMin = max(gateColumn - gateBandHalf, 0)
         let gMax = min(gateColumn + gateBandHalf, W - 1)
 
-        var best: (comp: Component, detY: Int, run: Int, winStart: Int)?
+        // §19 candidate tuple carries both the raw analyzeGate picker output
+        // (debug-only) and the torso-confirmed row that drives timing + display.
+        var best: (
+            comp: Component,
+            rawDetY: Int,
+            torsoY: Int,
+            run: Int,
+            winStart: Int,
+            torsoHRun: Int,
+            torsoBand: Int
+        )?
         var candidateCount = 0
+        var limbWaitCount = 0
         let frameAbsMin = Int(Float(H) * minGateHeightFraction)
         var anyBlobAtGate = false
+        currentFrameMaxCandidateH = 0
 
         for comp in components {
             if comp.height < minH {
@@ -284,7 +360,7 @@ final class DetectionEngine {
                 }
                 // Blob rescued by tightFill — use trimmedH for local_support need
                 trimmedHeight = trimmedH
-                print(String(format: "[FILL_RESCUE] frame=%d fill=%.2f tightFill=%.2f trimmedH=%d", frameIndex, fillRatio, tightFill, trimmedH))
+                slog(String(format: "[FILL_RESCUE] frame=%d fill=%.2f tightFill=%.2f trimmedH=%d", frameIndex, fillRatio, tightFill, trimmedH))
             }
             if comp.width > Int(maxAspectRatio * Float(comp.height)) {
                 logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
@@ -295,21 +371,103 @@ final class DetectionEngine {
                 continue
             }
 
+            // §19 Full-frame flash guard (Test X #14 failure mode).
+            // A global auto-exposure snap creates a connected component that
+            // covers nearly the whole frame with uniformly high fill. Without
+            // this prefilter, the torso gate below would over-qualify it
+            // because every row hits hRun ≈ W.
+            let frameArea = Float(W * H)
+            let coverage = Float(comp.area) / frameArea
+            let wFrac = Float(comp.width) / Float(W)
+            let hFrac = Float(comp.height) / Float(H)
+            if coverage > flashGuardCoverage
+                && fillRatio > flashGuardFill
+                && wFrac > flashGuardWFrac
+                && hFrac > flashGuardHFrac {
+                logReject("full_frame_flash",
+                          detail: String(format: "cov=%.2f fill=%.2f wFrac=%.2f hFrac=%.2f",
+                                         coverage, fillRatio, wFrac, hFrac))
+                continue
+            }
+
             let effectiveH = trimmedHeight ?? comp.height
-            if let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax, effectiveHeight: effectiveH) {
-                anyBlobAtGate = true
-                if analysis.hasQualifyingSlice {
-                    candidateCount += 1
-                    if best == nil || comp.area > best!.comp.area {
-                        best = (comp, analysis.detectionY, analysis.maxVerticalRun, analysis.winWindowStart)
-                    }
-                } else {
-                    let need = max(3, Int(Float(effectiveH) * localSupportFraction), frameAbsMin)
-                    logReject("local_support",
-                              detail: "run=\(analysis.maxVerticalRun) need=\(need)")
-                }
+            if effectiveH > currentFrameMaxCandidateH { currentFrameMaxCandidateH = effectiveH }
+            guard let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax, effectiveHeight: effectiveH) else {
+                continue
+            }
+            anyBlobAtGate = true
+            guard analysis.hasQualifyingSlice else {
+                // §18 H2 fix: reject log uses same floor-only rule as analyzeGate
+                let need = max(3, frameAbsMin)
+
+                // §17.4 H2 counterfactual instrumentation: log what `need`
+                // would have been under two alternative rules so we can
+                // pre-validate a fix offline without changing behavior.
+                //   - need_current: current rule (h × 0.25, floored at 25)
+                //   - need_min3   : min effectiveH over last 3 frames × 0.25
+                //   - need_floor  : floor only (25), no height scaling
+                var min_h = effectiveH
+                if candidateHHistory[0] > 0 { min_h = min(min_h, candidateHHistory[0]) }
+                if candidateHHistory[1] > 0 { min_h = min(min_h, candidateHHistory[1]) }
+                let need_min3 = max(3, Int(Float(min_h) * localSupportFraction), frameAbsMin)
+                let need_floor = max(3, frameAbsMin)
+                let run = analysis.maxVerticalRun
+                let pass_current = run >= need      ? "Y" : "N"
+                let pass_min3    = run >= need_min3 ? "Y" : "N"
+                let pass_floor   = run >= need_floor ? "Y" : "N"
+                slog(String(format:
+                    "[LS_COUNTERFACT] frame=%d run=%d h=%d min_h3=%d need_current=%d pass=%@ need_min3=%d pass=%@ need_floor=%d pass=%@",
+                    frameIndex, run, effectiveH, min_h,
+                    need, pass_current,
+                    need_min3, pass_min3,
+                    need_floor, pass_floor))
+
+                logReject("local_support",
+                          detail: "run=\(run) need=\(need)")
+                continue
+            }
+
+            // §19 Stage 2: torso-row confirmation. Stage 1 has told us
+            // *something* is moving at the gate column; Stage 2 decides if
+            // what's there is actually a torso. If not, refuse to fire —
+            // do not start cooldown, do not mark gateOccupied. The next
+            // frame will have another chance once the torso arrives.
+            guard let torso = pickTorsoGateRow(comp: comp) else {
+                limbWaitCount += 1
+                // Must mirror `pickTorsoGateRow`'s searchMaxY formula
+                // (blob-relative ∪ frame-relative) so LIMB_WAIT logs
+                // reflect the actual scan range. Keeping the old
+                // frame-only formula here would make every post-§19
+                // diagnostic log lie about where we searched.
+                let blobHeight = comp.maxY - comp.minY + 1
+                let blobUpperCeiling = comp.minY + Int(Float(blobHeight) * torsoSearchMaxFrac)
+                let frameUpperCeiling = Int(Float(H) * torsoSearchMaxFrac)
+                let searchMax = min(comp.maxY, max(frameUpperCeiling, blobUpperCeiling))
+                slog(String(format:
+                    "[LIMB_WAIT] frame=%d blob=%dx%d rawDetY=%d run=%d searchMaxY=%d reason=no_torso_band",
+                    frameIndex, comp.width, comp.height,
+                    analysis.detectionY, analysis.maxVerticalRun, searchMax))
+                continue
+            }
+
+            candidateCount += 1
+            if best == nil || comp.area > best!.comp.area {
+                best = (
+                    comp: comp,
+                    rawDetY: analysis.detectionY,
+                    torsoY: torso.y,
+                    run: analysis.maxVerticalRun,
+                    winStart: analysis.winWindowStart,
+                    torsoHRun: torso.hRun,
+                    torsoBand: torso.bandRows
+                )
             }
         }
+
+        // §17.4 H2 diagnostic: shift ring buffer forward one frame.
+        // Slot 0 drops off, slot 1 becomes slot 0, current frame becomes slot 1.
+        candidateHHistory[0] = candidateHHistory[1]
+        candidateHHistory[1] = currentFrameMaxCandidateH
 
         // Update buildup counter: increment if any blob reached gate analysis,
         // reset if no blob was at the gate at all.
@@ -335,18 +493,18 @@ final class DetectionEngine {
             return nil
         }
 
-        // §15 Arm-spike correction: from the side, a torso has uniform horizontal
-        // extent (~22-24 px) but an arm sticking out creates a sharp spike (~50+ px).
-        // If the picker landed on a spike row, shift detY to the non-spike torso region.
-        let spikeResult = adjustForArmSpike(detY: candidate.detY, comp: candidate.comp)
-        let pickerDetY = spikeResult.adjustedDetY
+        // §19 Torso-confirmed detY. The Stage 2 picker chose a row with a
+        // torso-like horizontal run, by construction not an arm spike, so we
+        // use it directly for timing, interpolation, and the displayed marker.
+        // rawDetY (analyzeGate's picker output) stays on the DETECT log as a
+        // debug comparison but never influences the fire.
+        let torsoDetY = candidate.torsoY
+        let rawDetY = candidate.rawDetY
 
-        // §12.5 frame-Y bias cap (hypothesis B): clamp picker output to top N% of frame.
-        // If the picker lands below the cap (deeper into legs on lean crossings), snap up
-        // to the cap. Safety floor: never clamp above the blob's topmost pixel.
-        // Interpolation (detRow below) still uses the spike-adjusted picker Y for timing accuracy.
-        let frameCap = Int(Float(processHeight) * frameBiasCap)
-        let clampedDetY = max(candidate.comp.minY, min(pickerDetY, frameCap))
+        // Keep adjustForArmSpike as a *diagnostic* — it builds the HRUN_PROFILE
+        // string we still want in logs. The adjustedDetY value is discarded
+        // because the torso row is already spike-free.
+        let spikeProfile = adjustForArmSpike(detY: torsoDetY, comp: candidate.comp)
 
         // Log all size-qualified components for diagnostics
         let qualComps = components.filter { $0.height >= minH && $0.width >= minW }
@@ -354,34 +512,39 @@ final class DetectionEngine {
             for (i, comp) in qualComps.enumerated() {
                 let atGate = comp.maxX >= gMin && comp.minX <= gMax
                 let tag = comp.area == candidate.comp.area ? ">>>" : "   "
-                print(String(format: "[COMP] %@ #%d %dx%d x=%d..%d y=%d..%d area=%d gate=%@",
+                slog(String(format: "[COMP] %@ #%d %dx%d x=%d..%d y=%d..%d area=%d gate=%@",
                              tag, i, comp.width, comp.height, comp.minX, comp.maxX, comp.minY, comp.maxY, comp.area, atGate ? "YES" : "no"))
             }
         }
 
-        // Body-part suppression (spec 6.4):
-        // If a larger size-qualified component exists in the frame that hasn't reached
-        // the gate yet but is approaching, suppress this detection and wait for it.
+        // §19 Body-part suppression is SKIPPED for torso-confirmed candidates.
+        // Stage 2 torso gating has already verified this blob has a stable
+        // torso band at the gate column; a larger approaching component off
+        // to the side is almost always (a) the same person's following limb,
+        // or (b) a second runner who will trigger their own detection when
+        // they reach the gate. Suppressing at this point just drops good
+        // crossings — the Test X logs show exactly this pattern. The scan
+        // is still performed for a diagnostic [BPS_SKIP] log line so we can
+        // tell when this rule would have fired historically.
         let approachZone = Int(Float(W) * 0.20) // within 20% of frame width
         for comp in components {
             guard comp.height >= minH, comp.width >= minW else { continue }
             guard comp.area > candidate.comp.area else { continue }
-            // This larger component must NOT be at the gate
             guard comp.maxX < gMin || comp.minX > gMax else { continue }
-            // Check if it's approaching the gate (leading edge within approach zone)
             let distToGate = comp.maxX < gMin ? (gMin - comp.maxX) : (comp.minX - gMax)
             if distToGate <= approachZone {
-                logReject("body_part_suppression",
-                          detail: "gate_area=\(candidate.comp.area) approaching_area=\(comp.area) dist=\(distToGate)")
-                return nil
+                slog(String(format:
+                    "[BPS_SKIP] frame=%d gate_area=%d approaching_area=%d dist=%d (torso-confirmed — not suppressing)",
+                    frameIndex, candidate.comp.area, comp.area, distToGate))
             }
         }
 
         // 6. Position-based interpolation (spec 7.1)
-        // At the detection row (detY), find the continuous horizontal run of mask
-        // pixels containing the gate. This is the leading-edge strip — its extent
-        // on each side of the gate gives the distances for interpolation.
-        let detRow = pickerDetY
+        // At the detection row (torsoDetY), find the continuous horizontal run
+        // of mask pixels containing the gate. This is the leading-edge strip —
+        // its extent on each side of the gate gives the distances for
+        // interpolation. §19: uses torsoDetY so timing and display agree.
+        let detRow = torsoDetY
         let prevSec = CMTimeGetSeconds(previousTimestamp)
         let dt = now - prevSec
 
@@ -448,19 +611,26 @@ final class DetectionEngine {
         // see test_runs_our_detector.md Test B/C.
         let expMs = exposureDuration.map { CMTimeGetSeconds($0) * 1000 } ?? -1
         let isoVal = iso ?? -1
-        let spikeTag = spikeResult.corrected ? " SPIKE_CORRECTED" : ""
         let pickerTag: String
         switch pickerMode {
         case .longestRun:    pickerTag = ""
         case .topThird:      pickerTag = " picker=topThird"
         case .absoluteFloor: pickerTag = " picker=floor\(absolutePickerFloor)"
         }
-        print(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d area=%d x=%d..%d detY=%d rawDetY=%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d%@%@",
-                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir, candidateCount, c.area, c.minX, c.maxX, clampedDetY, candidate.detY, frameIndex, crossingTime, expMs, isoVal, buildupAtDetection, spikeTag, pickerTag))
+        // §19: detY is now torsoDetY, rawDetY is the analyzeGate picker output,
+        // torsoHRun/torsoBand record what made Stage 2 accept this row.
+        slog(String(format: "[DETECT] blob=%dx%d hR=%.2f wR=%.2f fill=%.2f run=%d hRun=%d interp=%.0f/%.0f dir=%@ cands=%d limbWait=%d area=%d x=%d..%d detY=%d rawDetY=%d torsoHRun=%d torsoBand=%d/%d frame=%d time=%.3f exp=%.2fms iso=%.0f buildup=%d%@",
+                     c.width, c.height, hR, wR, fR, candidate.run, hRun, dBefore, dAfter, dir,
+                     candidateCount, limbWaitCount, c.area, c.minX, c.maxX,
+                     torsoDetY, rawDetY,
+                     candidate.torsoHRun, candidate.torsoBand, torsoWindowRows,
+                     frameIndex, crossingTime, expMs, isoVal, buildupAtDetection, pickerTag))
 
-        // §15 instrumentation: per-row hRun profile at the gate column
-        if !spikeResult.profile.isEmpty {
-            print("[HRUN_PROFILE] frame=\(frameIndex) median=\(spikeResult.median) detYhRun=\(spikeResult.detYHRun) corrected=\(spikeResult.corrected) pickerY=\(candidate.detY) adjY=\(pickerDetY) rows=[\(spikeResult.profile)]")
+        // §15 instrumentation: per-row hRun profile at the gate column.
+        // §19: the profile is now anchored on torsoDetY (the row actually used
+        // for timing) rather than the discarded raw picker output.
+        if !spikeProfile.profile.isEmpty {
+            slog("[HRUN_PROFILE] frame=\(frameIndex) median=\(spikeProfile.median) torsoYhRun=\(spikeProfile.detYHRun) rawDetY=\(rawDetY) torsoDetY=\(torsoDetY) rows=[\(spikeProfile.profile)]")
         }
 
         // DIAG: dump per-column gate stats for the winning blob
@@ -481,7 +651,10 @@ final class DetectionEngine {
             dBefore: dBefore,
             dAfter: dAfter,
             movingLeftToRight: movingLeftToRight,
-            gateY: clampedDetY,
+            gateY: torsoDetY,
+            rawGateY: rawDetY,
+            triggerHRun: candidate.torsoHRun,
+            triggerBandRows: candidate.torsoBand,
             componentBounds: CGRect(
                 x: CGFloat(c.minX) / CGFloat(W),
                 y: CGFloat(c.minY) / CGFloat(H),
@@ -887,9 +1060,13 @@ final class DetectionEngine {
 
     private func analyzeGate(comp: Component, gMin: Int, gMax: Int, effectiveHeight: Int? = nil) -> GateAnalysis? {
         let W = processWidth, H = processHeight
-        let heightForNeed = effectiveHeight ?? comp.height
-        let minSupport = max(3, Int(Float(heightForNeed) * localSupportFraction),
-                             Int(Float(H) * minGateHeightFraction))
+        _ = effectiveHeight // §18 H2 fix: no longer scale minSupport by blob height
+        // §18 H2 fix (2026-04-11): drop `heightForNeed × localSupportFraction`.
+        // The h-scaled term caused ratcheting — `need` climbed faster than `run`
+        // while the body was still entering the frame, killing near-qualifying
+        // crossings one row short. Counterfactual data in session_2026-04-11_184832
+        // (LS_COUNTERFACT lines) confirmed the floor-only rule recovers 4 of 6 misses.
+        let minSupport = max(3, Int(Float(H) * minGateHeightFraction))
 
         // Compute best vertical run for each gate column (full blob range).
         // colRuns drives the local_support fire condition regardless of pickerMode.
@@ -1039,6 +1216,97 @@ final class DetectionEngine {
             maxVerticalRun: overallBestAvg,
             winWindowStart: overallBestWi
         )
+    }
+
+    // MARK: - §19 Torso Gate Row (Test X fix)
+    //
+    // Split the gate analysis into two stages: Stage 1 (analyzeGate) decides
+    // "motion is present at the gate", Stage 2 (pickTorsoGateRow) decides
+    // "*what kind* of motion — limb or torso". Firing only happens when a
+    // torso-like band exists at the gate column. The returned torso row
+    // replaces the downstream detY used for timing, interpolation, and the
+    // thumbnail marker — this removes the old post-hoc frameBiasCap clamp
+    // that kept firing on limbs and only moved the dot cosmetically.
+    //
+    // Plan-provided constants (tune after next side-by-side):
+    //   torsoMinHRun      = 18   (min horizontal run to count as torso row)
+    //   torsoBandRows     = 5    (rows meeting torsoMinHRun in the window)
+    //   torsoWindowRows   = 7    (±3 rows centered on the candidate)
+    //   torsoSearchMaxFrac = 0.55 (upper-portion ceiling, applied as
+    //                              max of frame-relative and blob-relative;
+    //                              see pickTorsoGateRow for exact semantics)
+
+    private struct TorsoGateResult {
+        var y: Int           // chosen torso row (absolute frame Y)
+        var hRun: Int        // horizontal mask run at the chosen row
+        var bandRows: Int    // rows in the 7-row window meeting torsoMinHRun
+    }
+
+    /// Scan top-down through the blob's vertical range at the gate column and
+    /// return the first row whose horizontal mask run is torso-like AND sits
+    /// inside a stable band of similar rows. Returns nil when only thin-limb
+    /// or spike-like rows exist — the caller must NOT fire in that case.
+    private func pickTorsoGateRow(comp: Component) -> TorsoGateResult? {
+        let W = processWidth, H = processHeight
+        // Blob-relative ceiling: upper torsoSearchMaxFrac of the blob itself.
+        // Frame-relative ceiling: upper torsoSearchMaxFrac of the frame
+        // (legacy behavior). Take the deeper (more permissive) of the two so
+        // tall Test W blobs keep their old frame-relative ceiling bitwise
+        // intact while short/low Test Y/Z blobs unlock their own upper
+        // portion. `min(comp.maxY, …)` still clamps to the actual blob
+        // extent, so we never scan outside the blob.
+        let blobHeight = comp.maxY - comp.minY + 1
+        let blobUpperCeiling = comp.minY + Int(Float(blobHeight) * torsoSearchMaxFrac)
+        let frameUpperCeiling = Int(Float(H) * torsoSearchMaxFrac)
+        let searchMaxY = min(comp.maxY, max(frameUpperCeiling, blobUpperCeiling))
+        guard comp.minY <= searchMaxY else { return nil }
+
+        let half = torsoWindowRows / 2  // 7→3
+        // Include window overhang below searchMaxY so windows centered on
+        // the last legal candidate row are fully defined.
+        let scanTop = comp.minY
+        let scanBot = min(comp.maxY, searchMaxY + half)
+        guard scanTop <= scanBot else { return nil }
+
+        let rowCount = scanBot - scanTop + 1
+        var hRuns = [Int](repeating: 0, count: rowCount)
+        for i in 0..<rowCount {
+            let y = scanTop + i
+            guard maskBuf[y * W + gateColumn] != 0 else {
+                hRuns[i] = 0
+                continue
+            }
+            var lx = gateColumn, rx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[y * W + sx] != 0 { lx = sx; sx -= 1 }
+            sx = gateColumn + 1
+            while sx < W && maskBuf[y * W + sx] != 0 { rx = sx; sx += 1 }
+            hRuns[i] = rx - lx + 1
+        }
+
+        // Spike rejection uses the same median × 1.5 rule as adjustForArmSpike.
+        // An arm sticking forward inflates one or two rows well above the
+        // median torso width and must not be picked as the torso row.
+        let nonZero = hRuns.filter { $0 > 0 }.sorted()
+        let median = nonZero.isEmpty ? 0 : nonZero[nonZero.count / 2]
+        let spikeThreshold = Float(median) * spikeRatioThreshold
+
+        let lastCandidateIdx = searchMaxY - scanTop
+        guard lastCandidateIdx >= 0 else { return nil }
+
+        for i in 0...lastCandidateIdx {
+            let h = hRuns[i]
+            if h < torsoMinHRun { continue }
+            if median > 0 && Float(h) > spikeThreshold { continue }
+            let lo = max(0, i - half)
+            let hi = min(rowCount - 1, i + half)
+            var band = 0
+            for j in lo...hi where hRuns[j] >= torsoMinHRun { band += 1 }
+            if band >= torsoBandRows {
+                return TorsoGateResult(y: scanTop + i, hRun: h, bandRows: band)
+            }
+        }
+        return nil
     }
 
     // MARK: - §15 Arm-Spike Correction
@@ -1374,7 +1642,7 @@ final class DetectionEngine {
         // Hand swipes produce uniform runs (range 1-9), body crossings uneven (range 13-52).
         let colRange = colLongest.isEmpty ? 0 : (colLongest.max()! - colLongest.min()!)
         let colMin = colLongest.min() ?? 0
-        print("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) colRange=\(colRange) colMin=\(colMin) buildup=\(gateBuildup) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
+        slog("[\(tag)] frame=\(frameIndex) blob=\(comp.width)x\(comp.height) need=\(need) avg=\(avg) colRange=\(colRange) colMin=\(colMin) buildup=\(gateBuildup) cols=[\(detail.trimmingCharacters(in: .whitespaces))]")
     }
 
     // MARK: - Logging
@@ -1383,9 +1651,9 @@ final class DetectionEngine {
         guard reason != lastRejectReason else { return }
         lastRejectReason = reason
         if detail.isEmpty {
-            print("[REJECT] frame=\(frameIndex) \(reason)")
+            slog("[REJECT] frame=\(frameIndex) \(reason)")
         } else {
-            print("[REJECT] frame=\(frameIndex) \(reason) — \(detail)")
+            slog("[REJECT] frame=\(frameIndex) \(reason) — \(detail)")
         }
     }
 }

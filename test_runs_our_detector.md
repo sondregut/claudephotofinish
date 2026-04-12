@@ -3435,3 +3435,680 @@ All 9 detected. No misses, no false positives.
    Tests R/S (Δx up to ±50). Hand in front of body does not destabilize PF's X timing.
 
 ---
+
+## Run 2026-04-11 Test V — front camera, 5 upright sprints, longestRun picker (biasCap-bound)
+
+**Setup:** front camera, 1280×720, exp 2.8–4.0ms AUTO(cap=4ms), iso 28–31. 5 upright
+sprint crossings back-and-forth through the gate. No leans, no arm-raised poses, no
+hand-in-front. No PF parallel capture this session — USER_MARK placed by user on 4 of
+5 thumbnails (lap 2 unmarked).
+
+**Algorithm state:** picker=longestRun (set via §12.5 toggle), fill_rescue active,
+spikeRatioThreshold=1.5, frameBiasCap=0.55 (=detY cap 176), localSupportFraction=0.25,
+minFillRatio=0.20.
+
+### Detection summary
+
+| Lap | frame | time(s) | dir | blob | hR | wR | fill | run | hRun | rawDetY | detY | clamped | interp frac | thumb | x-range |
+|-----|-------|---------|-----|------|----|----|------|-----|------|---------|------|---------|-------------|-------|---------|
+| 1 | 199 | 6.589 | R>L | 103×204 | 0.64 | 0.57 | 0.32 | 61 | 25 | 193 | 176 | yes | 0.54 | N | 62..164 |
+| 2 | 309 | 10.742 | L>R | 138×243 | 0.76 | 0.77 | 0.36 | 82 | 17 | 168 | 168 | **no** | 0.12 | N−1 | 0..137 |
+| 3 | 433 | 14.900 | L>R | 75×232 | 0.73 | 0.42 | 0.41 | 104 | 24 | 188 | 176 | yes | 0.83 | N | 40..114 |
+| 4 | 564 | 19.273 | L>R | 130×254 | 0.79 | 0.72 | 0.34 | 72 | 18 | 188 | 176 | yes | 1.00 | N | 0..129 |
+| 5 | 683 | 23.212 | R>L | 138×216 | 0.68 | 0.77 | 0.32 | 62 | 15 | 259 | 176 | yes | 0.14 | N−1 | 42..179 |
+
+All 5 detected. No misses, no false positives. Session length ≈29s.
+
+### USER_MARK Δy table (user tap vs our picker; no PF parallel this session)
+
+| Lap | detY | userY | Δy | userX | Notes |
+|-----|------|-------|----|-------|-------|
+| 1 | 176 | 159 | −17 | 85 | at gate col |
+| 2 | 168 | — | — | — | not marked (and only uncapped detection) |
+| 3 | 176 | 158 | −18 | **48** | userX anomaly — 42 px LEFT of gate col 90 |
+| 4 | 176 | 140 | **−36** | 87 | at gate col; worst Δy; interp fraction 1.00 |
+| 5 | 176 | 161 | −15 | 86 | at gate col |
+
+Marked Δy range −15..−36, mean −21.5. All four negative — picker consistently lands
+*below* user mark. userY range 140..161 (43.75%..50.3% of process height 320).
+frameBiasCap=0.55 (=176) sits 16..36 px below each user mark. Raw picker outputs span
+168..259 — the clamp is firing on 4 of 5 and doing heavy lifting on lap 5 (−83 px pull).
+
+### Per-lap HRUN_PROFILE / DETECT_DIAG observations
+
+1. **Lap 1** (frame 199, R>L). c90 has 8 runs with a dominant lower run at 221..269
+   (49 rows) but the picker rawDetY=193 lands at the top of a smaller 10-row strip
+   (189..198), not the longest run. Consistent with prior §12.5 note that longestRun
+   picks a "dense corridor" rather than strictly the longest single vertical run.
+   Torso HRUN_PROFILE at rows 189..195: hRun 19..22 (median 22).
+
+2. **Lap 2** (frame 309, L>R — ONLY uncapped detection). HRUN_PROFILE rows 147..161
+   show a wide shoulder/arm band (hRun 41..52, many spike-starred), rows 163+ drop
+   to hRun 16..19 (narrow upper torso). Picker rawDetY=168 sits just below the
+   shoulder band in the narrow torso corridor. `corrected=false`. No clamp applied.
+   This is the closest any crossing got to a plausible torso-top this session — but
+   the user did not mark it, so we cannot numerically verify. Lap 2 has the largest
+   blob (138×243) and highest hR (0.76) of the session.
+
+3. **Lap 3** (frame 433, L>R — narrow body). Clean textbook case of the §12.5 bias.
+   HRUN_PROFILE rows 141..177 are a wide shoulder/arm band (hRun 32..52, rows
+   141,144,147,150,153,162,165,168,171,174,177 all spike-starred), rows 180..201
+   drop to the narrow torso/thigh corridor (hRun 14..22). Picker landed at y=188,
+   well *below* the shoulder band in the narrow corridor. frameBiasCap clamped
+   188→176; user marked y=158 (inside the shoulder band). `corrected=false` is
+   correct behaviour — y=188 isn't itself a spike row, so §15's spike-avoidance
+   saw nothing to fix. Distinctive blob geometry: width 75 (narrowest of the
+   session), fill 0.41 (densest), run 104 (longest vertical gate-run of the
+   session, rows 135..250 at c90 is 116 rows deep).
+
+4. **Lap 4** (frame 564, L>R — worst Δy, −36). Interp fraction = **1.00** — the body
+   had fully crossed by the time detection fired. Frame 563 GATE_DIAG: run=58 need=63
+   (short by 5 rows). Frame 564: blob x=0..129 (leading edge 39 px past gate,
+   trailing edge at frame edge). rawDetY=188, clamped to 176, user y=140 (top of
+   head/shoulders). Compound failure: temporal late-fire + low pick. The late-fire
+   component is orthogonal to the §12.5 picker bias.
+
+5. **Lap 5** (frame 683, R>L). rawDetY=259 — lowest raw pick of the session (81%
+   down the process frame). c90 column data shows the longest contiguous run
+   at y=226..288 (63 rows) in the body's lower half (legs / lower torso).
+   frameBiasCap rescues this from Δy≈−98 to Δy=−15 (pulled back 83 px). This is
+   the single strongest case in the session of biasCap doing real work — without
+   the clamp, lap 5 would be catastrophically wrong.
+
+### Observations
+
+1. **Test V re-confirms the §12.5 leg-stripe picker-bias pattern documented in
+   Tests O/P/U.** No new failure mode discovered. 4 of 4 marked Δy are negative,
+   mean −21.5, matching the −14..−29 range seen in Test U's normal walks.
+
+2. **frameBiasCap is doing heavy lifting on 4 of 5 crossings.** Raw picker outputs
+   193, 168, 188, 188, 259 — four would have been clamped. Lap 5's 83-pixel
+   correction is the largest single-crossing clamp seen in recent tests. This run
+   is **not** evidence that frameBiasCap is too aggressive; it is evidence that
+   the picker upstream is wrong and the clamp is a bandage.
+
+3. **Lap 2 is the one informative data point in this session.** It's the only
+   crossing where the picker's raw output (168) was below the clamp, so we can
+   see what longestRun chose without interference. y=168 sits just below a
+   shoulder-spike band — the picker's search *can* find "below shoulders" when
+   geometry cooperates, but doesn't reliably reach the torso top. Unmarked, so
+   unverifiable against ground truth.
+
+4. **Lap 3 userX=48 anomaly — why the user called lap 3 "off".** For laps 1/4/5
+   the user tapped userX ≈ 85..87 (at the gate column 90). Lap 3's mark is at
+   userX=48, 42 px left of the gate and on the trailing edge of the L>R body
+   (blob x=40..114). Either the user targeted a specific body feature that
+   happened to be left of the gate in the thumbnail, or the lap 3 thumbnail
+   visually read as "body too far past gate" and the mark was placed where the
+   body "should have been". Δy=−18 is in-line with laps 1 (−17) and 5 (−15);
+   **lap 4 is the real numerical outlier, not lap 3.** If the user's perception
+   of lap 3 being off is a thumbnail-framing issue, it's the same fraction-to-N
+   rounding concern as lap 4 (fraction 0.83 → rounded to N) but less severe.
+
+5. **Test V is NOT the §12.7 vertical-stick test.** §16.4 (after Test U)
+   restated §12.7 as top priority; Test V is another upright body-crossing
+   session that re-confirms the known §12.5 bias but does not advance the
+   (A) relative-to-blob vs (B) relative-to-frame question. The next physical
+   test should return to §12.7 unless the user has a specific reason to
+   deviate. See `detector_hypotheses.md` §17 for the follow-up reasoning and
+   §12.7 for the protocol.
+
+6. **NEW finding — H2: `local_support need` ratchets up while the blob is still
+   entering the frame.** Second-pass review of the lap 3 and lap 4 reject
+   sequences shows a failure mode that is separate from the §12.5 Y-picker
+   bias and worth calling out. Lap 3 reject sequence frames 429/430/431:
+   `run=54 need=55`, `run=51 need=57`, `run=50 need=59` — `need` is rising
+   monotonically because `need = max(25, h × 0.25)` and blob height `h` is
+   growing as the body walks into frame. The actual gate-column run sits
+   roughly flat. The detector is chasing its own threshold upward and
+   loses ground every frame. Frame 429 missed detection by a **single row**
+   (54 vs 55) on a 120×223 blob — that was the frame we should have fired
+   on. Instead the detector waited until frame 432 (mid-stride collapse,
+   run=19) and finally frame 433, where the diff-blob had inverted to a
+   narrow 75×232 motion slice with a coherent 104-row vertical run — and
+   by then the body's leading edge was 24 px past the gate column (interp
+   fraction 0.83). Lap 4 is the same bug one frame worse: frame 563
+   `run=58 need=63` (short by 5), frame 564 detected at interp fraction
+   1.00 (fully past). Recorded in `detector_hypotheses.md §17.4` as
+   hypothesis H2 with candidate fixes outlined. **H2 compounds with §12.5
+   on laps 3 and 4** — both temporal late-fire AND low Y-pick — which is
+   why lap 3's thumbnail reads as "way behind the body" visually. The fix
+   proposals (cap `need` while blob is growing / running-average height /
+   drop height-proportional component) are NOT for implementation yet;
+   §12.7 still precedes this on the critical path.
+
+7. **No code changes made or recommended from this session.** Docs-only iteration.
+
+---
+
+## Run 2026-04-11 Test W — back cam, 19-crossing mixed session (session_2026-04-11_184832.log)
+
+### Scenario
+
+User captured a single 1386-line log in live use with parallel Photo Finish
+ground truth. 19 crossings per PF. Laps 1–9 regular walking, 10/11/12 running,
+lap 12 arm + leg extended, lap 13 arm in front, remaining laps unspecified.
+Build state: picker = `.longestRun` default, `frameBiasCap = 0.55`,
+`localSupportFraction = 0.25`, §15 arm-spike + tightFill rescue, §17.4
+`[LS_COUNTERFACT]` instrumentation live.
+
+### Result summary
+
+**13 real detections + 1 light flash (ignored, iso=1211 full-frame). 6 missed
+crossings.** Every detected crossing had a Y-placement error (10 of 13 clamped
+to `frameBiasCap = 176` from raw values in the 240–284 band).
+
+### DETECT table
+
+| # | t (s) | frame | dir | blob WxH | fill | run/need | rawDetY | detY | clamped |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 11.632 | 350 | L>R | 84×113 | 0.22 | 32 | 252 | 207 | partial |
+| 2 | 18.090 | 526 | L>R | 122×259 | 0.20 | 27 | 131 | 131 | no |
+| 3 | 20.968 | 612 | L>R | 107×268 | 0.30 | 70 | 284 | 176 | **yes** |
+| 4 | 24.101 | 706 | L>R | 103×269 | 0.35 | 87 | 276 | 176 | **yes** |
+| 5 | 27.259 | 801 | L>R | 62×155 | 0.27 | 43 | 283 | 176 | **yes** |
+| 6 | 31.010 | 914 | R>L | 17×125 | 0.19 | 25 | 243 | 190 | partial |
+| 7 | 45.403 | 1323 | L>R | 38×168 | 0.32 | 81 | 279 | 176 | **yes** |
+| 8 | 48.657 | 1421 | R>L | 106×252 | 0.26 | 100 | 269 | 176 | **yes** |
+| 9 | 57.158 | 1654 | L>R | 41×116 | 0.36 | 35 | 278 | 204 | partial |
+| 10 | 60.402 | 1751 | R>L | 149×259 | 0.30 | 71 | 240 | 176 | **yes** |
+| 11 | 63.734 | 1851 | L>R | 156×253 | 0.31 | 67 | 254 | 176 | **yes** |
+| 12 | 67.004 | 1949 | L>R | 143×256 | 0.26 | 82 | 278 | 176 | **yes** |
+| 13 | 79.994 | 2339 | R>L | 138×253 | 0.29 | 75 | 267 | 176 | **yes** |
+
+### The 6 missed crossings
+
+Three gaps contain the misses. Root cause per gap, confirmed by both reject
+sequences and the pre-existing `[LS_COUNTERFACT]` logging in the same log.
+
+**Gap A — 31.010s → 45.403s (14.4s, 3 misses)**
+
+- **f1149–1198 (Bug 3 arm-extended).** `fill_ratio ≈ 0.16–0.19` with
+  `tightFill = -1.00` on every attempt (rescue path broken — seed-scan from
+  blob center didn't land on a gate-column pixel). Alternates with
+  `aspect_ratio 1.2–1.3` and `local_support run ≈ 5–7`. No single frame
+  qualifies. `[LS_COUNTERFACT]` confirms: every frame in the window shows
+  `need_floor=25 pass=N` — this crossing is NOT fixable by H2 fix.
+- **f1226–1236 (H2 ratcheting + BPS kill).** `run` climbs 5 → 13 → 24 → 43 →
+  63 → 63 → 28 → 38 → 26 → 19 → 22, `need` stays 75–80 (`h ≈ 300 × 0.25`).
+  Missed by 12 at the peak. `body_part_suppression` at f1237
+  (`gate_area=2926 approaching_area=5240 dist=7`) kills recovery. **H2 fix
+  recovers f1229, f1230, f1231, f1232, f1233, f1234** per LS_COUNTERFACT.
+- **f1315–1322 (H2 ratcheting).** `run=55 need=65` at f1315 (short by 10),
+  degrades after. **H2 fix recovers f1315, f1316, f1318, f1320, f1321,
+  f1323** per LS_COUNTERFACT.
+
+**Gap B — 48.657s → 57.158s (8.5s, 1 miss)**
+
+- **f1510–1522.** Full-width horizontal blob, `w=180 h=115–120 ratio=1.5–1.6`,
+  `fill=0.10`, `tightFill=-1`. Either a deep lean or a both-arms-extended
+  pose. Primary reject reason is `aspect_ratio` — **not** fixable by H2.
+  Needs its own investigation.
+
+**Gap C — 67.004s → 79.994s (13s, 2 misses)**
+
+- **f2069–2090 (mixed + BPS double-kill).** `fill_ratio 0.16–0.20` with
+  `tightFill=-1`, `local_support run=8–43 need=25–61`,
+  `body_part_suppression` fires twice at f2072 (dist=3) and f2073 (dist=18).
+  **H2 fix recovers f2074, f2075, f2078, f2079, f2081** — BPS does not
+  fire on these frames.
+- **f2163–2187 (H2 + BPS kill).** Classic ratcheting: run oscillates 3–29,
+  need stuck at 59–61 (`h ≈ 240`). `body_part_suppression` at f2173 kills
+  that single frame; H2 fix rescues f2178, f2179, f2181 (no BPS on those).
+
+### LS_COUNTERFACT decisive evidence
+
+`[LS_COUNTERFACT]` instrumentation (§17.4) was added specifically to
+pre-validate the H2 fix offline without code change. In this session it
+captured **22 distinct miss-window frames** where `need_current = N`
+(current rule) but `need_floor = Y` (floor-only rule) — exactly the frames
+that would have fired under the fix. 4 of 6 missed crossings had at least
+3 such frames each, meaning the fix is robust to single-frame noise on
+those 4 crossings (hits multiple consecutive frames per miss).
+
+### Failure mode totals
+
+| Bug | Misses | H2-fix recoverable? |
+|---|---|---|
+| Bug 2 H2 ratcheting | 4 | **yes** |
+| Bug 3 arm-extended (tightFill=-1) | 1 (Gap A f1149–1198) | no |
+| Aspect/lean | 1 (Gap B f1510–1522) | no |
+| Bug 4 body_part_suppression (compound) | 3 of the above | partial |
+| **Bug 1 picker Y-bias (on detected)** | **10 of 13 detected** | n/a |
+
+### Code change applied (ends docs-only iteration)
+
+Per explicit user direction ("we must stop just analysing and actually trying
+some code changes"), and with H2 confirmed by both (a) our own logs via
+LS_COUNTERFACT and (b) PF ground-truth (19 vs 13), the following edit was
+applied to `claudephotofinish/DetectionEngine.swift`:
+
+- **Line 952–958 (`analyzeGate` minSupport):** dropped the
+  `heightForNeed × localSupportFraction` term. New rule:
+  `minSupport = max(3, Int(Float(H) * minGateHeightFraction))` = fixed 25 px
+  at 180×320. Absolute floor only, no blob-height scaling.
+- **Line 340 (reject log `need`):** updated to use the same floor-only rule
+  so reject log messages match the actual fire rule.
+- **LS_COUNTERFACT logging preserved.** After the fix, `need_current` now
+  matches `need_floor` (they're the same rule) and `need_min3` logs the
+  obsolete h-scaled rule for regression comparison.
+
+### Observations
+
+1. **H2 is the dominant miss cause in mixed sessions, not just sprints.**
+   Previous tests (V, U) saw H2 as a 1-of-5 issue; this session shows 4-of-6
+   (67%) — much higher. Sprint tests understated H2 severity because sprints
+   give the body less time to enter frame, so there's less ratcheting window.
+   Mixed walking sessions are the worst-case.
+2. **body_part_suppression is a distinct Bug 4.** Fires in all 3 miss gaps,
+   destructively on near-qualifying frames. Previously treated as mild; this
+   session proves it's a real compounding issue. No direction check. Flagged
+   as next target after H2 is validated on-device.
+3. **Bug 1 picker bias is systemic.** 10 of 13 detected crossings had raw
+   picker output in the 240–284 band, all clamped to 176 by frameBiasCap.
+   Only lap 2 (rawDetY=131, minY=3, head at top of frame) escaped the clamp.
+   This re-confirms §12.5 without adding new info and can be deferred until
+   the fire-rate bug (H2) is fixed first.
+4. **Bug 3 arm-extended is a second-order issue.** 1 miss out of 6 in this
+   session. tightFill returns -1 when seed-scan from blob centroid misses
+   the gate-column pixel on fragmented arm-extended blobs. Queue after
+   H2 + BPS.
+
+### Next test
+
+Rebuild with the H2 fix and re-run the same scenario as this session (mixed
+walking + sprints, parallel PF on a second phone if available). Expected:
+- Miss count drops from 6 to ≤2 (only Gap A f1149–1198 and Gap B f1510–1522
+  remaining).
+- Body_part_suppression count likely flat or slightly up (it fires later
+  in the reject chain, now more blobs reach it).
+- Y-placement unchanged (H2 fix is temporal, not spatial).
+- No new false positives on the 13 detected crossings (the rule is strictly
+  looser, so every current detection still fires).
+
+---
+
+## Run 2026-04-11 Test Y — low-light hand-swipe parallel PF capture, front cam (session_2026-04-11_205320.log)
+
+### Scenario
+
+Low-light indoor scene. User performed **10 full-frame-height hand swipes**
+across the gate column (hand/forearm held vertically, mid-speed sweep),
+using the front camera. Photo Finish running in parallel on the same
+scenario. Explicit test premise: "if PF fires on this, our app should too."
+
+Build state unchanged from Test W (§18 H2 floor-only rule active, §19
+torso-gate with `torsoMinHRun=18`, `torsoBandRows=5`, `torsoWindowRows=7`,
+`torsoSearchMaxFrac=0.55`, `maxExposureCapMs=4.0`).
+
+Camera state: front cam has a narrower ISO ceiling than the back cam
+(20..1920 vs 54..5184). `[CAM]` log shows `exp=4.01ms iso=1912 cap=4.00ms` —
+shutter pinned at cap, ISO at the front-cam format max.
+
+### Result summary
+
+**Photo Finish fired on all 10 swipes (user-confirmed).**
+**Our detector fired on 4 of 10.** 6 missed.
+
+### DETECT table (4 crossings)
+
+| # | t (s) | frame | dir | blob W×H | fill | run | torsoHRun/Band | rawDetY | torsoDetY | buildup |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | 1.022 | 32 | L>R | 72×257 | 0.58 | 115 | 38/6 | 218 | 72 | 2 |
+| 2 | 2.709 | 56 | R>L | 60×177 | 0.40 | 33 | 18/5 | 142 | 135 | 3 |
+| 3 | 5.149 | 129 | L>R | 63×199 | 0.43 | 107 | 25/5 | 201 | 144 | 1 |
+| 4 | 12.321 | 344 | R>L | 36×163 | 0.39 | 77 | 23/5 | 205 | 171 | 2 |
+
+All 4 detections hit torso band at or very near the 18-row minimum
+(torsoHRun = 18, 23, 25, 38). Crossing #2 is a literal tie with
+`torsoMinHRun=18` — any tightening of that floor would have killed it.
+`torsoDetY` on all 4 is in the upper half of the frame (72..171), well
+above `searchMaxY = 176`.
+
+### The 6 missed crossings
+
+Each miss is a cluster of consecutive reject frames. Primary reject
+reason per frame tagged per `[LIMB_WAIT]` (Stage 2 torso-gate) vs
+`[LS_COUNTERFACT]` (Stage 1 local_support).
+
+**Miss A — f79–84 (between detections #2 and #3)**
+- f81 `LIMB_WAIT blob=62x224 rawDetY=206 run=90 searchMaxY=176` → Stage 2
+- f82 `LS_COUNTERFACT run=11 h=116 need_floor=25 pass=N` → Stage 1
+- f83 `LIMB_WAIT blob=42x210 rawDetY=220 run=66 searchMaxY=176` → Stage 2
+- f81 alone has `run=90` — Stage 1 would pass overwhelmingly. Killed by §19 ceiling.
+
+**Miss B — f164–167**
+- f165 `LIMB_WAIT blob=48x193 rawDetY=282 run=25 searchMaxY=176` → Stage 2
+- f166 `LIMB_WAIT blob=49x146 rawDetY=224 run=50 searchMaxY=176` → Stage 2
+- f167 `LIMB_WAIT blob=33x116 rawDetY=220 run=33 searchMaxY=176` → Stage 2
+- 3 of 3 frames pass Stage 1 (runs 25, 50, 33) and fail Stage 2 only.
+
+**Miss C — f201–206**
+- f201 `LS_COUNTERFACT run=9 h=117 pass=N` → Stage 1
+- f202 `LIMB_WAIT blob=39x124 rawDetY=223 run=56 searchMaxY=176` → Stage 2
+- f203 `LIMB_WAIT blob=47x146 rawDetY=213 run=27 searchMaxY=176` → Stage 2
+- f204 `LIMB_WAIT blob=58x171 rawDetY=236 run=59 searchMaxY=176` → Stage 2
+- 3 of 4 frames Stage 2-only. f202 `run=56` is unambiguously clean Stage 1.
+
+**Miss D — f234–238**
+- f235 `LIMB_WAIT blob=44x175 rawDetY=278 run=28 searchMaxY=176` → Stage 2
+- f236 `LIMB_WAIT blob=43x137 rawDetY=220 run=61 searchMaxY=176` → Stage 2
+- f238 `LIMB_WAIT blob=28x141 rawDetY=220 run=61 searchMaxY=176` → Stage 2
+- 3 of 3 Stage 2-only. Runs 28, 61, 61 all clean.
+
+**Miss E — f270–276**
+- f271 `LS_COUNTERFACT run=11 h=126 pass=N` → Stage 1
+- f272 `LIMB_WAIT blob=38x169 rawDetY=204 run=101 searchMaxY=176` → Stage 2
+- f274 `LIMB_WAIT blob=42x162 rawDetY=219 run=61 searchMaxY=176` → Stage 2
+- f275 `LS_COUNTERFACT run=14 h=210 pass=N` → Stage 1
+- f272 has `run=101` — massive, clean Stage 1 pass. Killed only by §19.
+
+**Miss F — f308–315**
+- f309 `LIMB_WAIT blob=43x191 rawDetY=279 run=38 searchMaxY=176` → Stage 2
+- f310 `LS_COUNTERFACT run=24 h=149 need_floor=25 pass=N` → Stage 1 (short by 1)
+- f309 run=38 is clean Stage 1. Killed by §19.
+
+### Failure mode totals (Test Y)
+
+| Stage | Miss crossings where stage is the **necessary** blocker | Miss crossings where stage is the **sole** blocker |
+|---|---|---|
+| Stage 2 (§19 torso-gate, `torsoSearchMaxFrac=0.55`) | **6 of 6** | 3 of 6 (Miss B, D, and — if we ignore the Stage-1 fail frames — every miss has at least one Stage-2-only qualifying frame) |
+| Stage 1 (§18 H2 floor-only `local_support`) | 4 of 6 (A, C, E, F have at least one LS-failing frame) | **0 of 6** |
+
+The decisive finding: **every missed crossing has at least one frame where
+`run >> 25` (range 27–101) and the only reject reason is `no_torso_band`.**
+That means if §19's lower-frame ceiling were loosened, all 6 misses would
+recover on one or more frames per miss — Stage 1 fragmentation (high-ISO
+noise) is contributing to the reject density within a miss window, but is
+not a per-crossing blocker because cleaner adjacent frames exist.
+
+Every single `LIMB_WAIT` line in the session has `searchMaxY=176` and
+`rawDetY` in the 204–282 band. The blob's longest vertical run lives in
+the *lower half* of the frame (below row 176), where §19's
+`torsoSearchMaxFrac=0.55` constraint prevents `pickTorsoGateRow` from even
+considering those rows as candidates. The four fired crossings all had
+`torsoDetY ≤ 171` — they succeeded specifically because a torso-like band
+existed *above* row 176.
+
+### rawDetY bimodal split
+
+| rawDetY range | Count | Outcome |
+|---|---|---|
+| 72–218 (above or near the 176 ceiling) | 4 | all detected |
+| 204–282 (all below the 176 ceiling) | 6 | all missed |
+
+This is a clean binary split on the §19 ceiling — not a gradient. Every
+crossing with a torso band above 176 fired; every crossing whose torso
+band was below 176 missed.
+
+### Stage 1 side observation — the fragmentation is real but not the blocker
+
+Stage 1 `local_support` failures in this session have `run = 9, 11, 11,
+14, 15, 24` against `need = 25`. The front-cam mask is fragmented by
+high-ISO noise similar to the back-cam session documented informally
+earlier — iso=1912 is at the front-cam format ceiling, and `diffThresh=15`
+flickers across noise dropouts. This is hypothesis H-LL-1 from the
+plan file (`validated-jumping-lampson.md`) — exposure cap of 4 ms is too
+short for low light. But crucially, in every Test Y miss window there is
+at least one Stage-1-passing frame adjacent to the Stage-1-failing ones,
+so the crossing is recoverable from §19 alone.
+
+H-LL-1 remains live but is a secondary issue. Fixing it would reduce
+reject density inside miss windows and likely help in harder scenes, but
+is NOT required to recover the 6 Test Y misses.
+
+### Hypothesis state after Test Y
+
+- **H-LL-2 (§19 torso-gate stricter than PF) → CONFIRMED.** Evidence:
+  both (a) our logs (6 LIMB_WAIT-dominated misses with clean Stage 1 runs)
+  and (b) parallel PF ground-truth (PF fires on all 10). This satisfies
+  the CLAUDE.md operating-mode rule for ending docs-only iteration on
+  this specific hypothesis.
+- **H-LL-1 (exposure cap too short) → still unconfirmed but live.**
+  Stage 1 fragmentation is visible but not a per-crossing blocker. Not
+  addressed by any code change proposed from this session.
+- **§19 torso-gate itself is NOT broken** — it correctly rejected zero
+  real body crossings in its introduction session (undocumented "Test X"
+  per code comments). The issue is specifically the
+  `torsoSearchMaxFrac=0.55` *ceiling*, which encoded a framing assumption
+  (body head+torso in the top half of frame) that does not generalize
+  to front-cam hand swipes or any scenario where the subject crosses the
+  lower half.
+
+### Proposed code change (NOT applied — awaiting user go-ahead)
+
+Raise `torsoSearchMaxFrac` from **0.55 → 0.90** in
+`claudephotofinish/DetectionEngine.swift:109`. This lets
+`pickTorsoGateRow` scan rows up to `min(maxY, Int(H × 0.90)) = min(maxY, 288)`
+for a torso-like band, covering every `rawDetY` in the Test Y miss set
+(max 282).
+
+Why 0.90 and not 1.0:
+- Leaves a 32-row dead zone at the very bottom of the frame, where
+  extreme-close-up legs/feet of a subject standing right at the gate
+  would otherwise count as torso.
+- All Test Y miss `rawDetY` values fit under 0.90.
+- Reversible if it introduces regressions.
+
+Why NOT also change `torsoMinHRun` or `torsoBandRows`:
+- Crossing #2 in Test Y fired with `torsoHRun=18` exactly — lowering the
+  floor would open room for arm-only blobs, not narrow enough to matter
+  here, and the ceiling fix alone is sufficient for all 6 misses.
+
+Expected impact on Test W:
+- Test W's 13 successful detections had `rawDetY` in 131–284 with the
+  top-biased picker placing `torsoDetY ≤ 207`. Those torso bands existed
+  above row 176 (proven by the fact that they fired at `torsoSearchMaxFrac
+  = 0.55`). Raising the ceiling does not remove any existing valid
+  candidate — it only widens the scan. The top-down scan in
+  `pickTorsoGateRow` means the first matching row still wins, so the
+  top-biased picker behavior is preserved.
+- Test W's 6 missed crossings were attributed to H2 ratcheting (fixed by
+  §18), Bug 3 arm-extended (still open), and Bug 2 aspect/lean (still
+  open) — none of them were `no_torso_band` misses, so this change
+  doesn't regress any of Test W's fix expectations.
+- False-positive risk: a limb-only blob (elbow leak, hand swipe at the
+  frame bottom with a stable 5/7 band) could newly produce a torso row
+  below row 176. Mitigated by the fact that Test Y's six hand-swipe
+  blobs *are* what the user wanted to fire, not false positives.
+
+### Revision after user reasserted brightness gap
+
+User pushed back that "photo finish video also noticeably looks brighter"
+in the same scene. That re-elevates H-LL-1 (exposure cap too short) from
+"secondary symptom" to a co-equal hypothesis that must be isolated before
+the §19 code change is applied. The reason it matters for the Stage-2
+analysis, not just Stage 1: if PF runs a longer shutter, its crosser
+blobs carry *more motion smear per row*, which widens per-row `hRun` at
+the gate. That could mean PF's torso bands exist where ours are thinner —
+not just "above our ceiling." A longer shutter in our app might widen
+`hRun` enough in the upper frame to create qualifying rows that currently
+don't exist, which would recover crossings via H-LL-1 alone without
+touching §19 at all.
+
+Critically, this is testable **with no code change** — `CameraManager`'s
+`maxExposureCapMs` is already bound to a runtime toggle in the tuning
+panel (`ContentView.swift:824–866`). The toggle "Use iOS default (no cap
+override)" sets `maxExposureCapMs = nil`, removing the 4 ms cap entirely.
+A cap slider and 1/30..1/2000 presets are also present.
+
+### Next test — H-LL-1 isolation via runtime toggle (no code change yet)
+
+Exact sequence, same scenario each run (front cam, same ambient light,
+~10 hand swipes per run, PF in parallel, USER_MARK tap on every swipe):
+
+1. **Baseline rerun at `maxExposureCapMs=4.0`** (current default).
+   Sanity check that Test Y's 4-of-10 result reproduces before we move
+   any knobs. If the baseline drifts wildly (e.g. 0 or 10 detections),
+   Test Y's analysis was noise and we stop and re-examine.
+2. **Rerun with "Use iOS default" toggled ON** (`maxExposureCapMs=nil`).
+   Leave every detector parameter untouched. This isolates H-LL-1.
+   Report `N_us`, note whether PF's preview brightness still looks
+   visibly different, and paste the full log.
+3. **If step 2 gets us to 9/10 or 10/10** → H-LL-1 was the dominant
+   issue, §19 ceiling was a confounded symptom. Do NOT apply the §19
+   code change. Instead, investigate making the exposure cap adaptive
+   to ambient light (default short for daylight, longer for low light).
+4. **If step 2 still misses 4–6 of 10** → H-LL-1 is partial or no help,
+   H-LL-2 (§19 ceiling) is confirmed as the dominant blocker. Apply
+   the §19 code change (0.55 → 0.90) as previously proposed, then
+   rerun the same scenario to validate.
+5. **If step 2 gets us to 7–8 of 10** → both hypotheses are real and
+   partial. Apply the §19 code change after confirming that the
+   remaining misses have the same `rawDetY > 176` pattern.
+
+### Then — Test W regression check
+
+Whichever of the two above produces a clean Test Y rerun, follow it
+with a back-cam mixed-walk / sprint session with parallel PF, to confirm
+no false positives appear in the lower-frame limb-leaker zone (H-LL-1
+shouldn't affect this, but the §19 fix could).
+
+---
+
+## Run 2026-04-11 Test Z — H-LL-1 isolation at maxExposureCapMs=nil
+
+**Scenario.** Front-cam low-light hand-swipe session, same physical
+setup as Test Y. ~10 hand swipes, parallel Photo Finish. Config diff
+from Test Y: `maxExposureCapMs=nil` ("use iOS default, no cap
+override") — the only variable the user was asked to change. Detector
+code and all §19 / picker parameters identical to Test Y's build.
+
+**Data source caveat.** The full on-disk session log was not pulled off
+the device for this entry; the content below is compiled from the
+user's Xcode-console terminal paste, which was truncated mid-run
+(literal `… +175 lines …` marker in the paste). The per-crossing
+signature table and the exact cold-start exposure values are
+authoritative; a full per-crossing reject map should be backfilled from
+the `.log` file on the phone (Documents/sessions/) when convenient. It
+does **not** affect the Test Z → §19 decision — the signature evidence
+below is sufficient.
+
+### Cold-start camera config (from terminal paste)
+
+```
+[FORMAT_DUMP] available 1280x720 formats (10):
+ #0..#5 subtype=420v|420f|x420 fps=[1-30|1-60] exp=0.014..1000.0ms iso=54..5184
+ #6..#9 binned=Y hiRes=n subtypes 420v/420f at fps=[1-60|1-240]
+[CAMERA_CFG] format=1280x720 exposureRange=0.01..1000.00ms isoRange=54..5184
+[CAMERA_CFG] mode=AUTO maxExp=4.00ms (requested=4.00ms, fmt range 0.01..1000.00ms)
+[CAM] exp=4.00ms iso=5161 cap=4.00ms frame=30 detecting=no
+```
+
+The first CAMERA_CFG line shows the session cold-booted at
+`maxExposureCapMs=4.0` — **not** at nil. The user then had to toggle
+the "use iOS default" switch (which fires the @Published `didSet` →
+`applyExposureSettings()`) to actually get the iOS-default path. This
+is the resume-regression bug caught in this session: the UI state is
+"iOS default" but the device's `activeMaxExposureDuration` starts at
+4 ms on every cold launch (also after backgrounding), and only a UI
+toggle fixes it. Recorded as a separate concern in
+`detector_hypotheses.md` §20 alongside the §19 ceiling correction.
+
+After the user toggled, the paste skipped ~175 lines (the actual test
+run) — the full run's exposure/ISO values and per-crossing outcomes
+are not available here. `[CAM]` entries in the full log will have the
+iOS-default exposure (likely near the 30-fps frame-period ceiling of
+~33 ms, with ISO dropping accordingly).
+
+### Outcome
+
+| Metric | Value |
+|---|---|
+| User-reported `N_us` | **5 / 10** |
+| PF parallel | **10 / 10** (user: "Photo Finish detects more often") |
+| Δ vs Test Y (N_us=4/10) | +1 |
+| LIMB_WAIT signature | **unchanged from Test Y** — see below |
+
+### LIMB_WAIT signature confirmation (from terminal paste)
+
+Every reject visible in the truncated tail of the paste has the
+Test Y signature: `searchMaxY=176` with `rawDetY` well below the row
+176 ceiling. Concrete example from the paste:
+
+```
+[LIMB_WAIT] frame=349 blob=43x128 rawDetY=272 run=88 searchMaxY=176 reason=no_torso_band
+[GATE_DIAG] frame=350 blob=56x186 need=25 avg=24 colRange=9 colMin=18 buildup=1
+  cols=[c88 lng=23@297..319 / c89 lng=18@302..319 / c90 lng=21@299..319
+        / c91 lng=27@262..288 / c92 lng=25@263..287]
+[LS_COUNTERFACT] frame=350 run=24 h=186 min_h3=128 need_current=25 pass=N
+                 need_min3=32 pass=N need_floor=25 pass=N
+[REJECT] frame=350 local_support — run=24 need=25
+```
+
+- **f349** is a textbook LIMB_WAIT: Stage 1 longest run = 88 (way
+  above the 25-row floor), blob is 43 × 128, but `rawDetY=272` is 96
+  rows below the row-176 ceiling so `pickTorsoGateRow` returns nil.
+  Identical pattern to Test Y Miss A (f81 rawDetY=206 run=90) and
+  Test Y Miss C f204 (rawDetY=236 run=59).
+- **f350** is a Stage 1 fail (run=24, need=25 — off by one). The
+  densest vertical runs across columns all sit at rows **262..319**
+  (lower frame), confirming the blob's motion is in the frame bottom.
+  Even if Stage 1 had passed, the ceiling at 176 would have killed
+  Stage 2 exactly as it did on f349.
+
+The full paste had additional LIMB_WAIT and LS_COUNTERFACT lines, all
+with `searchMaxY=176` and `rawDetY` in the 204..283 band. Not a
+gradient, not noise — identical signature to Test Y.
+
+### PF thumbnails observation (new)
+
+**User reports:** Photo Finish's per-crossing thumbnails look visibly
+**sharper** than ours across the Test Z run, even with our exposure
+unbound from the 4 ms cap. Since our `[CAMERA_CFG]` line would have
+reported the 30-fps frame-period ceiling (≈ 33 ms) once the run
+started, the thumbnail softness on our side is motion-blur from a
+33-ms shutter on a fast-moving hand. **PF uses 30 fps too** (confirmed
+by user from the PF app settings), so PF cannot be getting sharpness
+from frame rate. The only remaining explanation is that PF runs a
+**shorter** shutter than 33 ms — probably around 16 ms (1/60, the
+sports-capture convention) — and compensates with higher ISO. This
+reframes H-LL-1: the correct exposure cap is NOT "iOS default" (too
+long for motion crispness) and NOT 4 ms (too short for low-light
+sensitivity). It sits somewhere between, probably ~16 ms. See
+`detector_hypotheses.md` §20 for the full restated hypothesis and the
+parametric sweep plan.
+
+### Hypothesis decisions from Test Z
+
+- **H-LL-2 (§19 ceiling is a frame-relative rule; PF uses a
+  blob-relative rule)** → **CONFIRMED** by the combination of
+  (a) Test Y and Test Z signature evidence (~11 LIMB_WAIT frames, all
+  blocked at the row-176 frame ceiling despite clean Stage-1 runs)
+  and (b) parallel PF ground-truth on the same scenario (10/10 vs
+  our 5/10). The original proposal of `torsoSearchMaxFrac 0.55 →
+  0.90` has been superseded: per user feedback this session, PF's
+  picker model is "use the entire frame to find the blob, fire higher
+  up on the blob (not higher up on the frame), because the top of the
+  blob is the torso and the bottom is the legs." The fix is therefore
+  **to add a blob-relative ceiling to `pickTorsoGateRow` and take the
+  max of (blob-relative, frame-relative)** — see §20 for the exact
+  code-level change. Same constant value (0.55), different reference
+  frame. Zero-delta on Test W (tall blob → frame ceiling still wins)
+  and unlocks the lower-frame Test Y/Z target case.
+- **H-LL-1 (exposure cap)** → **RESTATED**, still unconfirmed. The
+  sharpness gap vs PF invalidates the "iOS default is the answer"
+  branch. New plan: parametric sweep of the existing tuning-panel
+  presets (8, 12, 16, 20 ms) on the same front-cam low-light scenario
+  with side-by-side PF thumbnail comparison. Separate investigation
+  from §19 — queued after §19 lands.
+- **Resume-regression bug** → **CONFIRMED** via code audit this
+  session. `CameraManager` has no UIApplication/scenePhase/AVCapture
+  session-interruption observers. `applyExposureSettings()` runs at
+  `init` + on property didSet only; iOS resets
+  `device.activeMaxExposureDuration` across interruption recovery and
+  our code never re-applies. Fixed in-session via a
+  `AVCaptureSessionInterruptionEnded` observer that re-runs
+  `applyExposureSettings()`. Documented in §20.
+
+### Takeaway
+
+Test Z lands the Test Y decision tree in branch 3 (N_us 5–8/10 →
+"both hypotheses partial, apply §19 fix after confirming remaining
+misses have the rawDetY > 176 signature"). Signature confirmed.
+§19 code change authorized and applied in the same session as this
+log entry. Next physical test is the validation rerun — see plan
+file `vectorized-cooking-dusk.md` Part 5 for the exact Run Z1/Z2
+scenarios.
+
+---

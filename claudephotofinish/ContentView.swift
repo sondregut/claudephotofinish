@@ -7,6 +7,15 @@ struct ContentView: View {
     @State private var fullscreenLapID: UUID? = nil
     @State private var justCopied = false
     @State private var showTuning = false
+    @State private var justCopiedLogs = false
+    /// Bumped on a timer while the tuning panel is open so the line-count
+    /// readout stays fresh (SessionLogger isn't Observable).
+    @State private var logLineCount = 0
+    /// URL of the most recent on-disk session log file, refreshed whenever
+    /// the tuning panel opens or the 1 Hz timer ticks. `nil` means there's
+    /// nothing yet to share (first launch, no Start tapped).
+    @State private var shareableSessionURL: URL? = nil
+    @State private var sessionFileCount = 0
 
     /// Live lookup of the fullscreen lap from `camera.crossings`. Reading
     /// through the published array (instead of a captured copy) means the
@@ -203,8 +212,13 @@ struct ContentView: View {
     /// the paired DETECT/DETECT_DIAG logs.
     private func copyRunDataMarkdown() {
         let laps = camera.crossings
-        var md = "| # | time | blob WxH | detY | userY | Δy | dir | interp |\n"
-        md += "|---|------|----------|------|-------|----|----|--------|\n"
+        // §19: include rawY (analyzeGate picker), torsoY (the fire row), and
+        // hRun (horizontal mask run at torsoY) so early limb fires cannot be
+        // hidden by a cosmetically-higher marker. If torsoY == rawY the gate
+        // wasn't biased; if they diverge, we fired on a limb and the table
+        // will show it.
+        var md = "| # | time | blob WxH | torsoY | rawY | hRun | band | userY | Δy | dir | interp |\n"
+        md += "|---|------|----------|--------|------|------|------|-------|----|----|--------|\n"
         for lap in laps {
             let w = Int(lap.componentBounds.width.rounded())
             let h = Int(lap.componentBounds.height.rounded())
@@ -215,8 +229,9 @@ struct ContentView: View {
             let interp = String(format: "%.0f/%.0f (%.2f)",
                                 lap.dBefore, lap.dAfter, lap.interpolationFraction)
             md += String(
-                format: "| %d | %.3f | %dx%d | %d | %@ | %@ | %@ | %@ |\n",
-                lap.crossingNumber, lap.time, w, h, lap.gateY,
+                format: "| %d | %.3f | %dx%d | %d | %d | %d | %d | %@ | %@ | %@ | %@ |\n",
+                lap.crossingNumber, lap.time, w, h,
+                lap.gateY, lap.rawGateY, lap.triggerHRun, lap.triggerBandRows,
                 userY, deltaY, lap.direction, interp
             )
         }
@@ -281,7 +296,10 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 TimelineView(.periodic(from: .now, by: 1.0 / 15.0)) { context in
-                    let elapsed = camera.timerStart.map { context.date.timeIntervalSince($0) } ?? 0
+                    // Freeze at `timerStop` once Stop is tapped, otherwise
+                    // tick against the live wall clock.
+                    let endDate = camera.timerStop ?? context.date
+                    let elapsed = camera.timerStart.map { endDate.timeIntervalSince($0) } ?? 0
                     HStack(alignment: .lastTextBaseline, spacing: 0) {
                         Text(formatTimeMajor(elapsed))
                             .font(.system(size: 48, weight: .bold, design: .monospaced))
@@ -607,6 +625,7 @@ struct ContentView: View {
         NavigationStack {
             Form {
                 liveReadoutSection
+                sessionLogsSection
                 pickerModeSection
                 modeSection
                 if camera.isManualExposure {
@@ -622,7 +641,113 @@ struct ContentView: View {
                     Button("Done") { showTuning = false }
                 }
             }
+            .onAppear { refreshLogState() }
+            .onReceive(
+                Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
+            ) { _ in
+                refreshLogState()
+            }
         }
+    }
+
+    // MARK: - Session Logs Section
+    //
+    // Lets the user grab the detector's console output without tethering
+    // to a Mac. Every slog(...) call mirrors to an in-memory ring buffer
+    // that this section dumps to the pasteboard. Workflow:
+    //   1. Run physical tests (Start → crossings → Stop).
+    //   2. Open tuning panel, hit "Copy Logs".
+    //   3. Paste into chat for analysis.
+
+    private var sessionLogsSection: some View {
+        Section("Session logs") {
+            HStack {
+                Text("Buffered").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(logLineCount) line\(logLineCount == 1 ? "" : "s")")
+                    .font(.system(.body, design: .monospaced))
+            }
+
+            HStack {
+                Text("On disk").foregroundStyle(.secondary)
+                Spacer()
+                Text("\(sessionFileCount) file\(sessionFileCount == 1 ? "" : "s")")
+                    .font(.system(.body, design: .monospaced))
+            }
+
+            Button(action: copySessionLogs) {
+                HStack {
+                    Image(systemName: justCopiedLogs ? "checkmark" : "doc.on.doc")
+                    Text(justCopiedLogs ? "Copied to clipboard" : "Copy logs")
+                }
+                .foregroundStyle(justCopiedLogs ? .green : .blue)
+            }
+            .disabled(logLineCount == 0)
+
+            // Share the most recent on-disk session file via AirDrop / Mail /
+            // Files / etc. This is the untethered path: run a physical test,
+            // tap Stop, open this panel, tap Share, AirDrop the .log to the
+            // Mac. Falls back to the newest file in Documents/sessions/ if no
+            // session was started this app launch.
+            if let url = shareableSessionURL {
+                ShareLink(item: url) {
+                    HStack {
+                        Image(systemName: "square.and.arrow.up")
+                        Text("Share session file")
+                        Spacer()
+                        Text(url.lastPathComponent)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            } else {
+                HStack {
+                    Image(systemName: "square.and.arrow.up")
+                    Text("Share session file")
+                    Spacer()
+                    Text("no session yet")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+                .foregroundStyle(.secondary)
+            }
+
+            Button(role: .destructive, action: clearSessionLogs) {
+                HStack {
+                    Image(systemName: "trash")
+                    Text("Clear logs")
+                }
+            }
+            .disabled(logLineCount == 0)
+
+            Text("Every Start → Stop writes a file to Documents/sessions/. Share it via AirDrop/Mail/Files to grab logs without tethering to a Mac, or browse to 'On My iPhone → claudephotofinish → sessions' in the Files app.")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+    }
+
+    private func copySessionLogs() {
+        let dump = SessionLogger.shared.snapshot()
+        UIPasteboard.general.string = dump
+        justCopiedLogs = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { justCopiedLogs = false }
+    }
+
+    private func clearSessionLogs() {
+        SessionLogger.shared.clear()
+        logLineCount = 0
+    }
+
+    /// Refresh the tuning panel's log-state readouts (line count, on-disk
+    /// file count, shareable URL). Called on panel appearance and on every
+    /// 1 Hz tick so the buttons reflect the live state of SessionLogger.
+    private func refreshLogState() {
+        logLineCount = SessionLogger.shared.lineCount
+        let files = SessionLogger.shared.allSessionFileURLs()
+        sessionFileCount = files.count
+        shareableSessionURL = SessionLogger.shared.mostRecentSessionFileURL()
     }
 
     // MARK: - Picker Mode Section (§12.5 A/B test)

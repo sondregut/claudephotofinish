@@ -15,6 +15,10 @@ final class CameraManager: NSObject, ObservableObject {
     @Published var cameraPosition: AVCaptureDevice.Position = .back
     @Published var crossings: [LapRecord] = []
     @Published private(set) var timerStart: Date? = nil
+    /// Set when the user taps Stop. When non-nil, the timer UI freezes the
+    /// elapsed display at `timerStop - timerStart` instead of ticking up
+    /// against the wall clock. Cleared by `startDetection` and `resetSession`.
+    @Published private(set) var timerStop: Date? = nil
     @Published var runNumber: Int = 1
 
     // MARK: Camera tuning (exposed to the UI)
@@ -45,10 +49,18 @@ final class CameraManager: NSObject, ObservableObject {
 
     // §12.5 A/B picker toggle — mirrored from engine so the tuning panel can bind to it
     @Published var pickerMode: PickerMode = .longestRun {
-        didSet { engine.pickerMode = pickerMode }
+        didSet {
+            engine.pickerMode = pickerMode
+            guard oldValue != pickerMode else { return }
+            slog("[CONFIG] pickerMode=\(pickerMode.rawValue) (was \(oldValue.rawValue))")
+        }
     }
     @Published var absolutePickerFloor: Int = 160 {
-        didSet { engine.absolutePickerFloor = absolutePickerFloor }
+        didSet {
+            engine.absolutePickerFloor = absolutePickerFloor
+            guard oldValue != absolutePickerFloor else { return }
+            slog("[CONFIG] absolutePickerFloor=\(absolutePickerFloor) (was \(oldValue))")
+        }
     }
 
     // Live readouts sampled from the capture queue. Updated ~once/sec to avoid
@@ -94,10 +106,33 @@ final class CameraManager: NSObject, ObservableObject {
         super.init()
         configureSession()
         startMotionTracking()
+        // Re-apply exposure settings when the capture session recovers
+        // from an interruption (app backgrounding, Siri, incoming call,
+        // another app taking the camera). iOS resets
+        // `device.activeMaxExposureDuration` across session interruption
+        // but our code only wrote it once in `configureSession`. Without
+        // this observer, resuming the app silently drops back to the
+        // format's default exposure cap and the "use iOS default" toggle
+        // in the UI becomes a lie until the user flips it off/on.
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleSessionInterruptionEnded),
+            name: .AVCaptureSessionInterruptionEnded,
+            object: captureSession
+        )
     }
 
     deinit {
         motionManager.stopDeviceMotionUpdates()
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func handleSessionInterruptionEnded(_ note: Notification) {
+        slog("[CAMERA_CFG] interruption ended, reapplying exposure")
+        processingQueue.async { [weak self] in
+            self?.applyExposureSettings()
+            DispatchQueue.main.async { self?.logCurrentConfig() }
+        }
     }
 
     // MARK: - Session
@@ -186,7 +221,7 @@ final class CameraManager: NSObject, ObservableObject {
         // sharpness by picking a high-frame-rate-capable format (where the
         // sensor's max integration time is natively short) rather than by
         // setting `activeMaxExposureDuration` explicitly.
-        print("[FORMAT_DUMP] available 1280x720 formats (\(candidates.count)):")
+        slog("[FORMAT_DUMP] available 1280x720 formats (\(candidates.count)):")
         for (i, fmt) in candidates.enumerated() {
             let sub = CMFormatDescriptionGetMediaSubType(fmt.formatDescription)
             let subStr = String(format: "%c%c%c%c",
@@ -197,7 +232,7 @@ final class CameraManager: NSObject, ObservableObject {
             }.joined(separator: ",")
             let minMs = CMTimeGetSeconds(fmt.minExposureDuration) * 1000
             let maxMs = CMTimeGetSeconds(fmt.maxExposureDuration) * 1000
-            print(String(
+            slog(String(
                 format: "[FORMAT_DUMP]  #%d subtype=%@ fps=[%@] exp=%.3f..%.1fms iso=%.0f..%.0f binned=%@ hiRes=%@",
                 i, subStr, fpsRanges, minMs, maxMs, fmt.minISO, fmt.maxISO,
                 fmt.isVideoBinned ? "Y" : "n",
@@ -214,14 +249,14 @@ final class CameraManager: NSObject, ObservableObject {
             let dims = CMVideoFormatDescriptionGetDimensions(fmt.formatDescription)
             let minExpMs = CMTimeGetSeconds(fmt.minExposureDuration) * 1000
             let maxExpMs = CMTimeGetSeconds(fmt.maxExposureDuration) * 1000
-            print(String(
+            slog(String(
                 format: "[CAMERA_CFG] format=%dx%d exposureRange=%.2f..%.2fms isoRange=%.0f..%.0f",
                 dims.width, dims.height,
                 minExpMs, maxExpMs,
                 fmt.minISO, fmt.maxISO
             ))
         } else {
-            print("[CAMERA_CFG] WARNING: no 1280x720@30 format found, using device default")
+            slog("[CAMERA_CFG] WARNING: no 1280x720@30 format found, using device default")
         }
 
         // Lock frame rate
@@ -244,7 +279,7 @@ final class CameraManager: NSObject, ObservableObject {
         do {
             try device.lockForConfiguration()
         } catch {
-            print("[CAMERA_CFG] lockForConfiguration failed: \(error)")
+            slog("[CAMERA_CFG] lockForConfiguration failed: \(error)")
             return
         }
         defer { device.unlockForConfiguration() }
@@ -261,7 +296,7 @@ final class CameraManager: NSObject, ObservableObject {
             let iso = min(max(manualISO, fmtMinISO), fmtMaxISO)
             let expCM = CMTimeMakeWithSeconds(expSec, preferredTimescale: 1_000_000)
             device.setExposureModeCustom(duration: expCM, iso: iso) { _ in }
-            print(String(
+            slog(String(
                 format: "[CAMERA_CFG] mode=MANUAL exp=%.2fms iso=%.0f",
                 expSec * 1000, iso
             ))
@@ -275,7 +310,7 @@ final class CameraManager: NSObject, ObservableObject {
             let capSec = min(max(capMs / 1000.0, fmtMinExp), fmtMaxExp)
             let capCM = CMTimeMakeWithSeconds(capSec, preferredTimescale: 1_000_000)
             device.activeMaxExposureDuration = capCM
-            print(String(
+            slog(String(
                 format: "[CAMERA_CFG] mode=AUTO maxExp=%.2fms (requested=%.2fms, fmt range %.2f..%.2fms)",
                 capSec * 1000, capMs, fmtMinExp * 1000, fmtMaxExp * 1000
             ))
@@ -288,7 +323,7 @@ final class CameraManager: NSObject, ObservableObject {
                 device.exposureMode = .continuousAutoExposure
             }
             device.activeMaxExposureDuration = .invalid
-            print("[CAMERA_CFG] mode=AUTO maxExp=<iOS default for format>")
+            slog("[CAMERA_CFG] mode=AUTO maxExp=<iOS default for format>")
         }
     }
 
@@ -331,7 +366,8 @@ final class CameraManager: NSObject, ObservableObject {
         applyCameraFormat()
         captureSession.commitConfiguration()
         engine.isFrontCamera = (next == .front)
-        print("[CAMERA] switched to \(next == .front ? "front" : "back")")
+        slog("[CAMERA] switched to \(next == .front ? "front" : "back")")
+        logCurrentConfig()
     }
 
     // MARK: - Detection Control
@@ -339,6 +375,7 @@ final class CameraManager: NSObject, ObservableObject {
     func startDetection() {
         crossings = []
         timerStart = Date()
+        timerStop = nil
         frameCount = 0
         droppedFrameCount = 0   // discard idle-period drops
         lastCaptureWallTime = 0 // start [GAP] measurement fresh
@@ -346,22 +383,79 @@ final class CameraManager: NSObject, ObservableObject {
         engine.isFrontCamera = (cameraPosition == .front)
         engine.start()
         isDetecting = true
-        print("[SESSION] detection started, run #\(runNumber)")
+        // Open a fresh on-disk session file BEFORE the first slog so every
+        // line below (including [SESSION] and [CONFIG]) lands in the file.
+        SessionLogger.shared.startSession()
+        slog("[SESSION] detection started, run #\(runNumber)")
+        logCurrentConfig()
+    }
+
+    /// Emit a single `[CONFIG]` line with every user-tunable mode/setting that
+    /// affects a test run: camera position, exposure mode, picker mode, and
+    /// the live shutter/ISO sampled from the device. Called at the start of
+    /// each detection session and on camera switch so log buffers copied out
+    /// via the tuning panel are fully self-describing.
+    func logCurrentConfig() {
+        let pickerDesc: String
+        switch pickerMode {
+        case .longestRun:    pickerDesc = "longestRun"
+        case .topThird:      pickerDesc = "topThird"
+        case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
+        }
+
+        // Sample the device directly rather than trusting the ~1Hz
+        // @Published readouts, which may be stale at session start.
+        var liveExpMs: Double = -1
+        var liveISO: Float = -1
+        var capMs: Double = -1
+        var fmtStr = "unknown"
+        if let device = currentInput?.device {
+            liveExpMs = CMTimeGetSeconds(device.exposureDuration) * 1000
+            liveISO = device.iso
+            let cap = device.activeMaxExposureDuration
+            capMs = CMTIME_IS_VALID(cap) ? CMTimeGetSeconds(cap) * 1000 : -1
+            let dims = CMVideoFormatDescriptionGetDimensions(device.activeFormat.formatDescription)
+            fmtStr = "\(dims.width)x\(dims.height)"
+        }
+
+        let expMode: String
+        if isManualExposure {
+            expMode = String(format: "MANUAL(%.2fms,iso%.0f)", manualExposureMs, manualISO)
+        } else if let req = maxExposureCapMs {
+            expMode = String(format: "AUTO(cap=%.2fms)", req)
+        } else {
+            expMode = "AUTO(default)"
+        }
+
+        slog(String(format:
+            "[CONFIG] run=%d cam=%@ format=%@ expMode=%@ liveExp=%.2fms liveISO=%.0f activeCap=%.2fms picker=%@ detecting=%@",
+            runNumber, cameraPosition == .front ? "front" : "back",
+            fmtStr, expMode, liveExpMs, liveISO, capMs, pickerDesc,
+            isDetecting ? "YES" : "no"
+        ))
     }
 
     func stopDetection() {
         engine.stop()
         isDetecting = false
-        print("[SESSION] detection stopped, \(crossings.count) crossings recorded")
+        // Freeze the timer UI at the moment Stop was tapped. Without this
+        // the TimelineView in ContentView keeps ticking against a live
+        // `timerStart` even though detection is off.
+        if timerStart != nil { timerStop = Date() }
+        slog("[SESSION] detection stopped, \(crossings.count) crossings recorded")
+        // Close the on-disk session file AFTER the final [SESSION] line so
+        // the stop marker is captured in the file.
+        SessionLogger.shared.endSession()
     }
 
     func resetSession() {
         stopDetection()
         crossings = []
         timerStart = nil
+        timerStop = nil
         runNumber += 1
         engine.reset()
-        print("[SESSION] reset, starting run #\(runNumber)")
+        slog("[SESSION] reset, starting run #\(runNumber)")
     }
 
     /// Update a lap's ground-truth mark. `point` is in the 180×320 source
@@ -373,7 +467,7 @@ final class CameraManager: NSObject, ObservableObject {
         let ux = Int(point.x.rounded())
         let uy = Int(point.y.rounded())
         let dy = uy - lap.gateY
-        print(String(
+        slog(String(
             format: "[USER_MARK] #%d detY=%d userY=%d Δy=%+d userX=%d time=%.3f",
             lap.crossingNumber, lap.gateY, uy, dy, ux, lap.time
         ))
@@ -433,7 +527,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         if lastCaptureWallTime > 0 {
             let gapMs = (nowWall - lastCaptureWallTime) * 1000
             if gapMs > 50 {
-                print(String(format: "[GAP] %.0fms gap before frame=%d", gapMs, frameCount))
+                slog(String(format: "[GAP] %.0fms gap before frame=%d", gapMs, frameCount))
             }
         }
         lastCaptureWallTime = nowWall
@@ -453,7 +547,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             let isoChanged = abs(iso - lastLoggedISO) >= 1
             let capChanged = abs(capMs - lastLoggedCapMs) >= 0.1
             if expChanged || isoChanged || capChanged {
-                print(String(
+                slog(String(
                     format: "[CAM] exp=%.2fms iso=%.0f cap=%.2fms frame=%d detecting=%@",
                     expMs, iso, capMs, frameCount, isDetecting ? "YES" : "no"
                 ))
@@ -471,7 +565,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
         // Log accumulated frame drops as a single summary
         if droppedFrameCount > 0 {
-            print("[FRAME_DROP] \(droppedFrameCount) frames dropped since frame \(frameCount)")
+            slog("[FRAME_DROP] \(droppedFrameCount) frames dropped since frame \(frameCount)")
             droppedFrameCount = 0
         }
 
@@ -502,7 +596,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
         let usePrevious = result.interpolationFraction < 0.5 && previousPlaneCopy != nil
         let chosenPlanes = usePrevious ? previousPlaneCopy : currentPlaneCopy
         let frameLabel = usePrevious ? "prev (N-1)" : "curr (N)"
-        print(String(format: "[THUMBNAIL] using %@ frame (fraction=%.2f)", frameLabel, result.interpolationFraction))
+        slog(String(format: "[THUMBNAIL] using %@ frame (fraction=%.2f)", frameLabel, result.interpolationFraction))
 
         previousPlaneCopy = currentPlaneCopy
 
@@ -525,6 +619,9 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                     time: result.crossingTime,
                     thumbnailData: thumbData,
                     gateY: result.gateY,
+                    rawGateY: result.rawGateY,
+                    triggerHRun: result.triggerHRun,
+                    triggerBandRows: result.triggerBandRows,
                     componentBounds: result.componentBounds,
                     interpolationFraction: result.interpolationFraction,
                     dBefore: result.dBefore,
@@ -535,7 +632,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                     userMarkedPoint: nil
                 )
                 self.crossings.append(record)
-                print("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
+                slog("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
             }
         }
     }

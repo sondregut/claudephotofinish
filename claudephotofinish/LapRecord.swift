@@ -6,7 +6,10 @@ struct LapRecord: Identifiable {
     let crossingNumber: Int
     let time: TimeInterval
     let thumbnailData: Data?
-    let gateY: Int
+    let gateY: Int                  // §19 torsoGateY — drives the dot and timing
+    let rawGateY: Int               // §19 analyzeGate picker output — debug only
+    let triggerHRun: Int            // §19 hRun at the torso row
+    let triggerBandRows: Int        // §19 rows in 7-row window meeting torsoMinHRun
     let componentBounds: CGRect
     let interpolationFraction: Double
     let dBefore: Float

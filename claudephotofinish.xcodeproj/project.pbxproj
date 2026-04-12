@@ -14,6 +14,7 @@
 		FB00000100000000000B0005 /* DetectionEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000100000000000A0005 /* DetectionEngine.swift */; };
 		FB00000100000000000B0006 /* LapRecord.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000100000000000A0006 /* LapRecord.swift */; };
 		FB00000100000000000B0007 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = FA00000100000000000A0008 /* Assets.xcassets */; };
+		FB00000100000000000B0008 /* SessionLogger.swift in Sources */ = {isa = PBXBuildFile; fileRef = FA00000100000000000A000A /* SessionLogger.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +27,7 @@
 		FA00000100000000000A0007 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		FA00000100000000000A0008 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		FA00000100000000000A0009 /* claudephotofinish.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = claudephotofinish.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FA00000100000000000A000A /* SessionLogger.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLogger.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -56,6 +58,7 @@
 				FA00000100000000000A0004 /* CameraManager.swift */,
 				FA00000100000000000A0005 /* DetectionEngine.swift */,
 				FA00000100000000000A0006 /* LapRecord.swift */,
+				FA00000100000000000A000A /* SessionLogger.swift */,
 				FA00000100000000000A0008 /* Assets.xcassets */,
 				FA00000100000000000A0007 /* Info.plist */,
 			);
@@ -145,6 +148,7 @@
 				FB00000100000000000B0004 /* CameraManager.swift in Sources */,
 				FB00000100000000000B0005 /* DetectionEngine.swift in Sources */,
 				FB00000100000000000B0006 /* LapRecord.swift in Sources */,
+				FB00000100000000000B0008 /* SessionLogger.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
