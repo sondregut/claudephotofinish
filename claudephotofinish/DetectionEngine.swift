@@ -214,6 +214,15 @@ final class DetectionEngine {
         isActive = false
     }
 
+    /// Re-arm the warmup counter so the next N frames are skipped.
+    /// Called after a camera-session interruption (background/foreground)
+    /// to suppress the exposure-snap false positive.
+    func resetWarmup() {
+        frameIndex = 0
+        hasPrevious = false
+        slog("[ENGINE] warmup reset (post-interruption)")
+    }
+
     func reset() {
         stop()
         sessionStart = nil
@@ -223,6 +232,8 @@ final class DetectionEngine {
         hasPrevious = false
         frameIndex = 0
         lastFullW = 0
+        candidateHHistory = [0, 0]
+        currentFrameMaxCandidateH = 0
     }
 
     // MARK: Main Processing
@@ -317,7 +328,7 @@ final class DetectionEngine {
         // 2. Connected components
         let components = findComponents()
 
-        // 5. Gate detection
+        // 3. Gate detection
         let minH = Int(Float(H) * heightFraction)
         let minW = Int(Float(W) * widthFraction)
         let gMin = max(gateColumn - gateBandHalf, 0)
@@ -392,7 +403,7 @@ final class DetectionEngine {
 
             let effectiveH = trimmedHeight ?? comp.height
             if effectiveH > currentFrameMaxCandidateH { currentFrameMaxCandidateH = effectiveH }
-            guard let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax, effectiveHeight: effectiveH) else {
+            guard let analysis = analyzeGate(comp: comp, gMin: gMin, gMax: gMax) else {
                 continue
             }
             anyBlobAtGate = true
@@ -508,13 +519,11 @@ final class DetectionEngine {
 
         // Log all size-qualified components for diagnostics
         let qualComps = components.filter { $0.height >= minH && $0.width >= minW }
-        if qualComps.count > 1 || true {
-            for (i, comp) in qualComps.enumerated() {
-                let atGate = comp.maxX >= gMin && comp.minX <= gMax
-                let tag = comp.area == candidate.comp.area ? ">>>" : "   "
-                slog(String(format: "[COMP] %@ #%d %dx%d x=%d..%d y=%d..%d area=%d gate=%@",
-                             tag, i, comp.width, comp.height, comp.minX, comp.maxX, comp.minY, comp.maxY, comp.area, atGate ? "YES" : "no"))
-            }
+        for (i, comp) in qualComps.enumerated() {
+            let atGate = comp.maxX >= gMin && comp.minX <= gMax
+            let tag = comp.area == candidate.comp.area ? ">>>" : "   "
+            slog(String(format: "[COMP] %@ #%d %dx%d x=%d..%d y=%d..%d area=%d gate=%@",
+                         tag, i, comp.width, comp.height, comp.minX, comp.maxX, comp.minY, comp.maxY, comp.area, atGate ? "YES" : "no"))
         }
 
         // §19 Body-part suppression is SKIPPED for torso-confirmed candidates.
@@ -635,8 +644,7 @@ final class DetectionEngine {
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
-        let detectNeed = max(3, Int(Float(c.height) * localSupportFraction),
-                             Int(Float(H) * minGateHeightFraction))
+        let detectNeed = max(3, Int(Float(H) * minGateHeightFraction))
         logGateDiagPrefix("DETECT_DIAG", comp: c, columns: detectCols, need: detectNeed,
                           avg: candidate.run, winStart: candidate.winStart,
                           sliceWidth: min(sliceWidth, detectCols.count))
@@ -807,7 +815,7 @@ final class DetectionEngine {
             mutableData, "public.jpeg" as CFString, 1, nil
         ) else { return nil }
         CGImageDestinationAddImage(dest, cgImage,
-            [kCGImageDestinationLossyCompressionQuality: 1.0] as CFDictionary)
+            [kCGImageDestinationLossyCompressionQuality: 0.9] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         return mutableData as Data
     }
@@ -817,13 +825,8 @@ final class DetectionEngine {
         yData: Data, yBpr: Int,
         cbcrData: Data, cbcrBpr: Int,
         fullW: Int, fullH: Int,
-        transpose: Bool, mirrorX: Bool = false,
-        thumbWidth: Int = 720, thumbHeight: Int = 1280, scale: Int = 1
+        transpose: Bool, mirrorX: Bool = false
     ) -> Data? {
-        // thumbWidth/thumbHeight/scale are vestigial — output is always at source resolution
-        // (after orientation), produced via Accelerate so we don't stall the capture pipeline.
-        _ = thumbWidth; _ = thumbHeight; _ = scale
-
         // 1. Build BT.709 video-range YpCbCr → ARGB conversion info.
         var info = vImage_YpCbCrToARGB()
         var pixelRange = vImage_YpCbCrPixelRange(
@@ -1010,7 +1013,7 @@ final class DetectionEngine {
                                            nCount == 3 ? min(n0, min(n1, n2)) :
                                            min(n0, min(n1, min(n2, n3)))
                                 lp[idx] = minL
-                                if nCount >= 2 { union(n1, minL) }
+                                if nCount >= 2 { union(n0, minL); union(n1, minL) }
                                 if nCount >= 3 { union(n2, minL) }
                                 if nCount >= 4 { union(n3, minL) }
                             }
@@ -1058,9 +1061,8 @@ final class DetectionEngine {
 
     private let sliceWidth = 3 // multi-column window for local support scoring
 
-    private func analyzeGate(comp: Component, gMin: Int, gMax: Int, effectiveHeight: Int? = nil) -> GateAnalysis? {
+    private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
         let W = processWidth, H = processHeight
-        _ = effectiveHeight // §18 H2 fix: no longer scale minSupport by blob height
         // §18 H2 fix (2026-04-11): drop `heightForNeed × localSupportFraction`.
         // The h-scaled term caused ratcheting — `need` climbed faster than `run`
         // while the body was still entering the frame, killing near-qualifying
@@ -1294,19 +1296,50 @@ final class DetectionEngine {
         let lastCandidateIdx = searchMaxY - scanTop
         guard lastCandidateIdx >= 0 else { return nil }
 
+        // Scan qualifying rows and group them into contiguous bands.
+        // Pick the center of the longest band — naturally mid-torso,
+        // since the shoulder-to-hip region is the longest continuous
+        // qualifying band for a side-view human body.
+        var bands: [(startIdx: Int, length: Int)] = []
+        var bandStart = -1
+
         for i in 0...lastCandidateIdx {
             let h = hRuns[i]
-            if h < torsoMinHRun { continue }
-            if median > 0 && Float(h) > spikeThreshold { continue }
-            let lo = max(0, i - half)
-            let hi = min(rowCount - 1, i + half)
-            var band = 0
-            for j in lo...hi where hRuns[j] >= torsoMinHRun { band += 1 }
-            if band >= torsoBandRows {
-                return TorsoGateResult(y: scanTop + i, hRun: h, bandRows: band)
+            var qualifies = false
+            if h >= torsoMinHRun && (median == 0 || Float(h) <= spikeThreshold) {
+                let lo = max(0, i - half)
+                let hi = min(rowCount - 1, i + half)
+                var band = 0
+                for j in lo...hi where hRuns[j] >= torsoMinHRun { band += 1 }
+                qualifies = band >= torsoBandRows
+            }
+            if qualifies {
+                if bandStart == -1 { bandStart = i }
+            } else if bandStart != -1 {
+                bands.append((startIdx: bandStart, length: i - bandStart))
+                bandStart = -1
             }
         }
-        return nil
+        if bandStart != -1 {
+            bands.append((startIdx: bandStart, length: lastCandidateIdx + 1 - bandStart))
+        }
+        guard !bands.isEmpty else { return nil }
+
+        // Pick the longest band. Tie-break: center closest to blob center.
+        let maxLen = bands.map(\.length).max()!
+        let blobCenterY = (comp.minY + comp.maxY) / 2
+        let bestBand = bands.filter { $0.length == maxLen }
+            .min { abs(scanTop + $0.startIdx + $0.length/2 - blobCenterY)
+                 < abs(scanTop + $1.startIdx + $1.length/2 - blobCenterY) }!
+
+        let centerIdx = bestBand.startIdx + bestBand.length / 2
+        // Recompute bandRows for the center row's 7-row window.
+        let lo = max(0, centerIdx - half)
+        let hi = min(rowCount - 1, centerIdx + half)
+        var bandCount = 0
+        for j in lo...hi where hRuns[j] >= torsoMinHRun { bandCount += 1 }
+
+        return TorsoGateResult(y: scanTop + centerIdx, hRun: hRuns[centerIdx], bandRows: bandCount)
     }
 
     // MARK: - §15 Arm-Spike Correction
@@ -1460,11 +1493,18 @@ final class DetectionEngine {
         guard median > 0 else { return (-1, 0) }
         let threshold = Float(median) * spikeRatioThreshold
 
-        // Count non-spike rows
-        let nonSpikeRows = hRuns.filter { Float($0) <= threshold }.count
+        // Count non-spike rows and their total hRun (gate-local area proxy)
+        var nonSpikeRows = 0
+        var nonSpikeArea = 0
+        for h in hRuns {
+            if Float(h) <= threshold {
+                nonSpikeRows += 1
+                nonSpikeArea += h
+            }
+        }
         guard nonSpikeRows > 0 else { return (-1, 0) }
 
-        let tightFill = Float(comp.area) / Float(comp.width * nonSpikeRows)
+        let tightFill = Float(nonSpikeArea) / Float(comp.width * nonSpikeRows)
         return (tightFill, nonSpikeRows)
     }
 
