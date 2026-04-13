@@ -32,20 +32,37 @@ Six Swift files, no external dependencies:
 
 - **`claudephotofinishApp.swift`** — App entry point.
 
+## Behavioral Requirements Checklist
+
+Before any code change to the detector, verify (mentally or by test) that the change does not break these behaviors. These mirror what Photo Finish does and are non-negotiable:
+
+1. **Must detect torso crossings** — upright walk/sprint through the gate must fire, Y-placement should land mid-chest (within ~15px of USER_MARK at 320px height)
+2. **Must reject hand swipes** — an arm or hand waved through the gate from outside the frame must NOT fire
+3. **Must reject leg-only motion** — a leg swinging in front of the body before the torso crosses should not trigger a premature detection
+4. **Must work in varied lighting** — indoor, outdoor, low-light. Exposure correction and warmup frames exist for this
+5. **Must work on fast and slow crossings** — both walking pace and sprint speed through the gate
+6. **Must work when user leans forward** — a forward lean (e.g., finishing a sprint) must still detect, not be rejected by geometry filters
+7. **Must work on front and rear cameras** — gate position and frame orientation must be correct for both
+8. **Must not double-fire** — cooldown prevents multiple detections for a single crossing
+9. **Must not fire on environmental motion** — trees, shadows, background people should be filtered by blob geometry
+
+If a proposed change risks any of these, flag it before implementing and discuss which tradeoff is acceptable.
+
 ## Key Detection Parameters (DetectionEngine)
 
 | Parameter | Value | Purpose |
 |---|---|---|
 | `processWidth/Height` | 180×320 | Downsampled working resolution (portrait) |
 | `diffThreshold` | 15 | Luma delta to count as motion |
-| `heightFraction` | 0.33 | Min blob height as fraction of frame |
+| `heightFraction` | 0.55 | Min blob height as fraction of frame (176px at 320) |
 | `widthFraction` | 0.08 | Min blob width as fraction of frame |
 | `localSupportFraction` | 0.25 | Min vertical run at gate as fraction of blob height |
-| `minFillRatio` | 0.25 | Reject sparse blobs (hand swipes) |
+| `minFillRatio` | 0.20 | Reject sparse blobs (hand swipes) — no rescue |
 | `maxAspectRatio` | 1.2 | Reject wide-flat blobs |
 | `cooldown` | 0.5s | Min time between detections |
 | `warmupFrames` | 10 | Skip frames while auto-exposure settles |
 | `gateBandHalf` | 2 | Gate is center column ±2 pixels |
+| `torsoFraction` | 0.30 | DetY at 30% from blob top (mid-chest placement) |
 
 ## Reference Documents
 
