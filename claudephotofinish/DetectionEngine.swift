@@ -148,6 +148,14 @@ final class DetectionEngine {
     private var candidateHHistory: [Int] = [0, 0]
     private var currentFrameMaxCandidateH: Int = 0
 
+    // §22 H-LIMB-LEAD diagnostic: ring buffer of gate-band mask occupancy
+    // for the last 5 frames. Each entry: (columns in [gMin..gMax] with any
+    // mask pixel, total mask pixel count in that band). Lets us tell a
+    // gradual torso-arrival trace apart from a sudden limb spike when the
+    // fire frame logs [GATE_TRACE]. Pure instrumentation.
+    private var gateBandHistory: [(cols: Int, pixels: Int)] = []
+    private let gateBandHistoryLen = 5
+
     // MARK: Init
 
     init() {
@@ -170,6 +178,7 @@ final class DetectionEngine {
         gateBuildup = 0
         candidateHHistory = [0, 0]
         currentFrameMaxCandidateH = 0
+        gateBandHistory.removeAll()
         hasPrevious = false
         lastRejectReason = ""
         frameIndex = 0
@@ -224,6 +233,7 @@ final class DetectionEngine {
         lastFullW = 0
         candidateHHistory = [0, 0]
         currentFrameMaxCandidateH = 0
+        gateBandHistory.removeAll()
     }
 
     // MARK: Main Processing
@@ -323,6 +333,28 @@ final class DetectionEngine {
         let minW = Int(Float(W) * widthFraction)
         let gMin = max(gateColumn - gateBandHalf, 0)
         let gMax = min(gateColumn + gateBandHalf, W - 1)
+
+        // §22 H-LIMB-LEAD instrumentation: count gate-band occupancy this
+        // frame (independent of blob detection) and push into the 5-frame
+        // ring buffer. Logged on fire via [GATE_TRACE].
+        do {
+            var bandCols = 0
+            var bandPixels = 0
+            for x in gMin...gMax {
+                var colHadMask = false
+                for y in 0..<H {
+                    if maskBuf[y * W + x] != 0 {
+                        bandPixels += 1
+                        colHadMask = true
+                    }
+                }
+                if colHadMask { bandCols += 1 }
+            }
+            gateBandHistory.append((cols: bandCols, pixels: bandPixels))
+            if gateBandHistory.count > gateBandHistoryLen {
+                gateBandHistory.removeFirst(gateBandHistory.count - gateBandHistoryLen)
+            }
+        }
 
         // §19 candidate tuple carries both the raw analyzeGate picker output
         // (debug-only) and the torso-confirmed row that drives timing + display.
@@ -595,6 +627,12 @@ final class DetectionEngine {
         if !spikeProfile.profile.isEmpty {
             slog("[HRUN_PROFILE] frame=\(frameIndex) median=\(spikeProfile.median) torsoYhRun=\(spikeProfile.detYHRun) rawDetY=\(rawDetY) torsoDetY=\(torsoDetY) rows=[\(spikeProfile.profile)]")
         }
+
+        // §22 H-LIMB-LEAD diagnostics (all log-only, no detection change).
+        logLimbLeadDiagnostics(comp: c, torsoDetY: torsoDetY,
+                               gMin: gMin, gMax: gMax,
+                               movingLeftToRight: movingLeftToRight,
+                               fullBlobFill: fR)
 
         // DIAG: dump per-column gate stats for the winning blob
         let detectCols = Array(gMin...gMax).filter { $0 >= 0 && $0 < W }
@@ -1270,6 +1308,220 @@ final class DetectionEngine {
 
         let adjustedDetY = runTop + bestStart + bestLen / 2
         return SpikeResult(adjustedDetY: adjustedDetY, profile: profileStr, median: median, detYHRun: detYHRun, corrected: true)
+    }
+
+    // MARK: - §22 H-LIMB-LEAD diagnostics
+    //
+    // Emits four log lines on every fire frame. All log-only — no detector
+    // behavior change. Purpose: find a signal that separates a limb-lead
+    // early fire (arm or leg reaches gate before torso) from a torso-arrived
+    // fire. Tested features didn't discriminate on Test EE (hRun at torsoDetY
+    // spans 1–36 across both good and bad fires). These four are candidates.
+
+    private func logLimbLeadDiagnostics(
+        comp: Component,
+        torsoDetY: Int,
+        gMin: Int,
+        gMax: Int,
+        movingLeftToRight: Bool,
+        fullBlobFill: Float
+    ) {
+        let W = processWidth
+        let H = processHeight
+
+        // 1. [LIMB_PROFILE] — per-row hRun across the FULL blob Y-extent.
+        // HRUN_PROFILE only samples rows connected at the gate column from
+        // torsoDetY. If the arm and torso are disconnected in the gate
+        // column (gap between them), HRUN_PROFILE sees only one piece.
+        // LIMB_PROFILE samples across the whole blob so we can see both.
+        // Per row: longest contiguous mask run containing gateColumn. 0 if
+        // no mask at gate in that row.
+        let blobTop = comp.minY
+        let blobBot = comp.maxY
+        let blobH = blobBot - blobTop + 1
+        let step = max(1, blobH / 20)
+        var limbParts = [String]()
+        for y in stride(from: blobTop, through: blobBot, by: step) {
+            guard y >= 0, y < H else { continue }
+            if maskBuf[y * W + gateColumn] == 0 {
+                limbParts.append("\(y):0")
+                continue
+            }
+            var lx = gateColumn
+            var rx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[y * W + sx] != 0 { lx = sx; sx -= 1 }
+            sx = gateColumn + 1
+            while sx < W && maskBuf[y * W + sx] != 0 { rx = sx; sx += 1 }
+            limbParts.append("\(y):\(rx - lx + 1)")
+        }
+        slog("[LIMB_PROFILE] frame=\(frameIndex) blobY=\(blobTop)..\(blobBot) torsoDetY=\(torsoDetY) rows=[\(limbParts.joined(separator: " "))]")
+
+        // 2. [CENTROID_X] — mass-weighted X centroid of the blob's mask,
+        // expressed as signed offset from the gate column in the direction
+        // of travel. Positive = body bulk has reached/passed the gate;
+        // negative = bulk is still behind the gate (consistent with a
+        // limb-lead fire where only a forward appendage has crossed).
+        var sumX: Int64 = 0
+        var massCount: Int64 = 0
+        let cxMinX = max(comp.minX, 0)
+        let cxMaxX = min(comp.maxX, W - 1)
+        let cxMinY = max(comp.minY, 0)
+        let cxMaxY = min(comp.maxY, H - 1)
+        for y in cxMinY...cxMaxY {
+            let rowBase = y * W
+            for x in cxMinX...cxMaxX {
+                if maskBuf[rowBase + x] != 0 {
+                    sumX += Int64(x)
+                    massCount += 1
+                }
+            }
+        }
+        let centroidX = massCount > 0 ? Int(sumX / massCount) : -1
+        let bboxMidX = (comp.minX + comp.maxX) / 2
+        let rawOffset = centroidX - gateColumn
+        let signedOffset = movingLeftToRight ? rawOffset : -rawOffset
+        let bboxOffset = bboxMidX - gateColumn
+        let bboxSigned = movingLeftToRight ? bboxOffset : -bboxOffset
+        slog("[CENTROID_X] frame=\(frameIndex) centroidX=\(centroidX) bboxMidX=\(bboxMidX) gateX=\(gateColumn) dir=\(movingLeftToRight ? "L>R" : "R>L") offsetSigned=\(signedOffset) bboxOffsetSigned=\(bboxSigned) mass=\(massCount)")
+
+        // 3. [GATE_TRACE] — last up-to-5 frames' gate-band occupancy (cols
+        // with any mask, total mask pixels in gate band). Torso-arrival
+        // should show a growing trace; a limb-lead fire often shows a
+        // small-but-just-crossed-threshold spike on the fire frame.
+        let traceStr = gateBandHistory.map { "\($0.cols)/\($0.pixels)" }.joined(separator: ",")
+        slog("[GATE_TRACE] frame=\(frameIndex) band=col\(gMin)..\(gMax) last\(gateBandHistory.count)=[\(traceStr)] (cols/pixels; oldest→newest)")
+
+        // 4. [GATE_WINDOW_FILL] — fill within the narrow gate-band strip
+        // restricted to the blob's Y-extent, compared to full-blob fill.
+        // A torso-arrived fire: strip fill ≈ full-blob fill (body fills
+        // the gate band densely across all rows). A limb-lead fire: strip
+        // fill ≪ full-blob fill (gate band is mostly empty except where
+        // the limb pokes through).
+        var gateWindowMask = 0
+        let gwMinX = max(gMin, 0)
+        let gwMaxX = min(gMax, W - 1)
+        for y in cxMinY...cxMaxY {
+            let rowBase = y * W
+            for x in gwMinX...gwMaxX {
+                if maskBuf[rowBase + x] != 0 { gateWindowMask += 1 }
+            }
+        }
+        let gwW = gwMaxX - gwMinX + 1
+        let gwH = cxMaxY - cxMinY + 1
+        let gwArea = gwW * gwH
+        let gwFill = gwArea > 0 ? Float(gateWindowMask) / Float(gwArea) : 0
+        slog(String(format:
+            "[GATE_WINDOW_FILL] frame=%d gwMask=%d gwArea=%d(%dx%d) gwFill=%.3f fullBlobFill=%.3f ratio=%.3f",
+            frameIndex, gateWindowMask, gwArea, gwW, gwH, gwFill, fullBlobFill,
+            fullBlobFill > 0 ? gwFill / fullBlobFill : 0))
+
+        // 5. [GAP_STRUCTURE] — enumerate the distinct mask runs in the
+        // gate column (x = gateColumn) within the blob's Y-extent. Torso-
+        // arrived fire: one dominant run spanning most of the body. Limb-
+        // lead fire (lap-11 style): small top run (arm) + large interior
+        // gap + lower run (torso/legs). We log each run as startY-endY:len,
+        // the largest interior gap, and the index of the run containing
+        // torsoDetY so we can see which piece we fired on.
+        var runs = [(s: Int, e: Int)]()
+        var rs = -1
+        for y in cxMinY...cxMaxY {
+            let on = maskBuf[y * W + gateColumn] != 0
+            if on {
+                if rs < 0 { rs = y }
+            } else if rs >= 0 {
+                runs.append((rs, y - 1))
+                rs = -1
+            }
+        }
+        if rs >= 0 { runs.append((rs, cxMaxY)) }
+        var maxGap = 0
+        for i in 1..<runs.count {
+            let g = runs[i].s - runs[i - 1].e - 1
+            if g > maxGap { maxGap = g }
+        }
+        var detYRunIdx = -1
+        for (i, r) in runs.enumerated() where torsoDetY >= r.s && torsoDetY <= r.e {
+            detYRunIdx = i
+            break
+        }
+        let runsStr = runs.enumerated().map { (i, r) in
+            "\(i):\(r.s)-\(r.e):\(r.e - r.s + 1)"
+        }.joined(separator: " ")
+        slog("[GAP_STRUCTURE] frame=\(frameIndex) gateCol=\(gateColumn) blobY=\(cxMinY)..\(cxMaxY) nRuns=\(runs.count) maxGap=\(maxGap) detYRunIdx=\(detYRunIdx) runs=[\(runsStr)]")
+
+        // 6. [LOCAL_WIDTH] — horizontal mask width at the gate column
+        // sampled at several Y levels across the blob. If a torso is at
+        // the gate, width is thick (~35-60 px) at chest/belly rows. If
+        // only an arm is at the gate, width is thin (~8-15 px) at the
+        // arm's Y. This is the local-geometry signal we've been missing.
+        let widthSamples = 6
+        var widthParts = [String]()
+        for i in 0..<widthSamples {
+            let frac = Float(i) / Float(widthSamples - 1)
+            let y = cxMinY + Int(Float(cxMaxY - cxMinY) * frac)
+            guard y >= 0, y < H else { widthParts.append("\(y):OOB"); continue }
+            if maskBuf[y * W + gateColumn] == 0 {
+                widthParts.append("\(y):0")
+                continue
+            }
+            var lx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[y * W + sx] != 0 { lx = sx; sx -= 1 }
+            var rx = gateColumn
+            sx = gateColumn + 1
+            while sx < W && maskBuf[y * W + sx] != 0 { rx = sx; sx += 1 }
+            widthParts.append("\(y):\(rx - lx + 1)")
+        }
+        // Also measure width at torsoDetY specifically (the row we fire on).
+        var wAtDetY = 0
+        if torsoDetY >= 0 && torsoDetY < H && maskBuf[torsoDetY * W + gateColumn] != 0 {
+            var lx = gateColumn
+            var sx = gateColumn - 1
+            while sx >= 0 && maskBuf[torsoDetY * W + sx] != 0 { lx = sx; sx -= 1 }
+            var rx = gateColumn
+            sx = gateColumn + 1
+            while sx < W && maskBuf[torsoDetY * W + sx] != 0 { rx = sx; sx += 1 }
+            wAtDetY = rx - lx + 1
+        }
+        slog("[LOCAL_WIDTH] frame=\(frameIndex) gateCol=\(gateColumn) torsoDetY=\(torsoDetY) wAtDetY=\(wAtDetY) samples=[\(widthParts.joined(separator: " "))]")
+
+        // 7. [TORSO_COLUMN] — scan every column in the blob's X range.
+        // Find the frontmost column (in the direction of travel) whose
+        // longest vertical mask run is ≥ 50% of blob height. That column
+        // is the torso's leading edge. Log its X and signed distance from
+        // the gate. A limb-lead fire: torso column is well behind gate
+        // (distSigned negative). Clean torso-at-gate fire: torso column
+        // at or past gate (distSigned near 0 or positive).
+        let localBlobH = cxMaxY - cxMinY + 1
+        let torsoRunMin = max(20, localBlobH / 3)
+        var frontTorsoX = -1
+        var frontTorsoRun = 0
+        let xRange: StrideThrough<Int> = movingLeftToRight
+            ? stride(from: cxMaxX, through: cxMinX, by: -1)
+            : stride(from: cxMinX, through: cxMaxX, by: 1)
+        for x in xRange {
+            var curRun = 0
+            var maxRun = 0
+            for y in cxMinY...cxMaxY {
+                if maskBuf[y * W + x] != 0 {
+                    curRun += 1
+                    if curRun > maxRun { maxRun = curRun }
+                } else {
+                    curRun = 0
+                }
+            }
+            if maxRun >= torsoRunMin {
+                frontTorsoX = x
+                frontTorsoRun = maxRun
+                break
+            }
+        }
+        let torsoDist = frontTorsoX >= 0 ? (frontTorsoX - gateColumn) : -999
+        let torsoDistSigned = frontTorsoX >= 0
+            ? (movingLeftToRight ? torsoDist : -torsoDist)
+            : -999
+        slog("[TORSO_COLUMN] frame=\(frameIndex) blobH=\(localBlobH) runMin=\(torsoRunMin) frontTorsoX=\(frontTorsoX) runLen=\(frontTorsoRun) distFromGate=\(torsoDist) distSigned=\(torsoDistSigned) dir=\(movingLeftToRight ? "L>R" : "R>L")")
     }
 
     // MARK: - Diagnostic: per-column gate stats

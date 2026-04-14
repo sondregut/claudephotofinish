@@ -2626,3 +2626,546 @@ toggle, confirm `[CAMERA_CFG] interruption ended...` fires and that
    validation with background/foreground cycle). See plan file.
 
 ---
+
+## §22 H-LIMB-LEAD (was H-ARM-LEAD-X) — moving leading appendage triggers early fire
+
+**Build under analysis.** Post-§21 blob-fraction rule
+(`torsoDetY = blob.minY + 0.30 × blob.height`), FILL_RESCUE removed,
+torsoFraction=0.30, localSupport=0.25, minFill=0.20.
+
+**Session.** Test DD (2026-04-14), front cam, 13 crossings across
+three deliberately controlled scenario blocks. Raw logs and full
+per-lap verdict table in `test_runs_our_detector.md` under
+"Run 2026-04-14 Test DD — arm-lead isolation".
+
+### Hypothesis
+
+During a running arm swing, the leading arm reaches the gate
+column **before the torso does**. The moving forward-swinging arm
+generates enough motion-edge signal in the gate column (rows
+spanning the arm's vertical extent at the chest/shoulder level)
+to satisfy the Stage-1 local-support check
+(`gateMaxVerticalRun ≥ localSupportFraction × blob.height`,
+i.e., ~25 px on a 200 px blob). The detector fires on that frame.
+
+The §21 Y-anchor still places `detY` on roughly-torso height
+because the connected blob spans both the arm and the torso in Y,
+so `blob.minY + 0.30·height` lands near the chest. But the
+**fire frame is too early in time** — the torso has not yet
+physically crossed the gate. In the thumbnail, the torso appears
+behind the gate line (in the direction of travel); the dot at
+(gateColumn, detY) appears "in empty space in front of the torso."
+
+### Evidence — Test DD scenario blocks
+
+| Block | Scenario | Failures / Marked |
+|---|---|---|
+| A | Arm extended forward **static**, walking pace | **0 / 5** |
+| B | Regular jogging with **pumping arm swing** | **3 / 4** |
+| C | Hands clasped behind back, torso leads | **0 / 4** |
+
+The bug is only triggered when an appendage **moves** forward ahead
+of the torso. Static arms don't trigger it (no motion-differential
+signal); absent forward appendage doesn't trigger it (torso is the
+earliest edge at the gate).
+
+**Diagnostic signatures on the failed laps (Test DD #6, #7, #9):**
+
+- `hRun` at the chosen `torsoDetY` row is **small** (10–18 px),
+  vs. ~30–40 px expected for a true torso-wide intersection at
+  this FOV.
+- `rawDetY` (analyzeGate's raw row pick) lands in the upper
+  ~30% of the blob (rows 113, 196 — i.e., picker locked onto a
+  narrow high-Y column dominated by the arm).
+- Blob x-extent reaches well past the gate in the direction of
+  travel (L→R lap #6: x=22..114 with gate=90; R→L laps #7, #9:
+  x=63..179 and x=73..178, all straddling the gate asymmetrically
+  so the leading arm has crossed while the bulk of the body has
+  not).
+
+**Thumbnail observation** (user, post-test): on laps #6/#7/#9 the
+yellow detector dot landed **in empty space just forward of the
+torso** or "arm-ish in X." The user could clearly see the torso
+had not yet reached the gate line at fire time.
+
+### Why the existing guards don't catch it
+
+- **Stage-1 local support (25 px vertical run at gate):** a moving
+  arm at chest/shoulder level easily produces 25+ px of vertical
+  motion-edge in the gate column during forward swing. Passes.
+- **Fill ratio ≥ 0.20:** blob fill on failed laps was 0.31, 0.36,
+  0.33 — above threshold because the combined arm+torso blob
+  has reasonable density. Passes.
+- **Max aspect ≤ 1.2:** not triggered; blobs are taller than wide.
+- **Height ≥ 0.55 of frame:** passes because the blob Y-extent
+  includes both arm (high) and torso (mid-frame).
+
+The gate-column check doesn't discriminate *what body part* is
+producing the vertical run at the gate — arm or torso both qualify.
+
+### Confirmation status
+
+**4 of 4 reached — H-LIMB-LEAD confirmed on four independent samples.**
+Test DD Block B (3/4 fail), Test EE (5/7 fail), Test FF (10/12 fail),
+and Test GG (9/10 fail — worst yet) all show the same failure
+signature. Raw data in `test_runs_our_detector.md` under
+"Run 2026-04-14 Test EE", "Run 2026-04-14 Test FF", and
+"Run 2026-04-14 Test GG".
+
+**Operating-mode PF-parallel rule relaxed.** User clarified that
+`USER_MARK userX` is approximately where Photo Finish would fire in
+the X dimension. That makes the "need (a) our logs + (b) PF parallel"
+rule from CLAUDE.md effectively satisfied for X — USER_MARK is a
+proxy for PF-X ground truth. Y ground truth from USER_MARK is less
+precise, but Y-placement is not the bug we're hunting.
+
+Generalizing the name from **H-ARM-LEAD-X** → **H-LIMB-LEAD**: Test EE
+DETECT_DIAG shows vertical runs at the gate satisfying Stage-1 local
+support span rows 230–265 on failure laps — i.e., hip/upper-leg level,
+not only arm/shoulder. Any moving appendage that reaches the gate
+column before the torso can drive the early fire. The mechanism (moving
+limb produces motion-edge in gate column, Stage-1 passes on limb-only
+signal, §21 blob-fraction still places detY on torso-ish height because
+the connected blob spans limb+torso) is identical; the limb isn't
+always the arm.
+
+**Test EE per-lap summary (7 marked laps; lap 1 ignored per user):**
+
+| Lap | Dir | hRun@detY | Verdict |
+|---|---|---|---|
+| 2 | R→L | 36 | ❌ fired on arm |
+| 3 | L→R | 15 | ✅ good |
+| 4 | R→L | 26 | ❌ fired on arm |
+| 5 | L→R | 21 | ⚠️ barely arm |
+| 6 | R→L | 1  | ❌ fired on arm |
+| 7 | R→L | 15 | ⚠️ barely arm |
+| 8 | R→L | 14 | ✅ good |
+
+**3 clear failures + 2 partial / 7 marked = ≥5/7 failure rate**, well
+above the ≥5/10 confirmation threshold.
+
+### Fix design is partially unblocked — centroid-X is a candidate but imperfect
+
+Test FF added four diagnostics on the fire frame (`LIMB_PROFILE`,
+`CENTROID_X`, `GATE_TRACE`, `GATE_WINDOW_FILL`). Across 12 marked
+jogging laps:
+
+**`CENTROID_X offsetSigned` (mass-weighted centroid X − gateX, signed
+by travel direction) is the best single signal found.** It cleanly
+separates 11 of 12 laps:
+
+```
+  −46  lap 12  BAD
+  −42  lap  3  BAD
+  −38  lap 10  BAD
+  −37  lap  7  BAD
+  −35  laps 1, 8, 9  BAD
+  −31  lap  5  BAD
+ ── 5-px gap ──
+  −26  lap  2  GOOD
+  −25  lap  6  GOOD
+  −21  lap 11  BAD  ← false negative
+  − 4  lap  4  GOOD
+```
+
+A rule `offsetSigned ≤ −28 → reject` catches 9/10 BADs and preserves
+3/3 GOODs in the non-lap-11 set. Lap 11 slips through at −21.
+
+**The other three diagnostics are noisier:**
+
+- `GW ratio`: Lap 1 BAD (1.185) overlaps with Lap 2 GOOD (0.975);
+  Lap 11 BAD (1.376) overlaps with Lap 6 GOOD (1.452).
+- `GATE_TRACE` N-2 pixel count: GOOD range 31–426, BAD range 0–149 —
+  overlap zone in the middle.
+- `LIMB_PROFILE` nonzero sampled row count: GOOD range 6–15, BAD
+  range 3–9 — Lap 2 GOOD (6) overlaps with several BADs.
+
+### Lap 11 failure mode
+
+Lap 11 is the only lap in the session that triggered `[HRUN_PROFILE]`
+(§15 arm-spike detection). The gate-column mask has a discrete arm
+band at rows 167..179 (13 rows, peak hRun=36), a gap, then torso/leg
+mask at rows 215..276. The full-blob centroid averages arm + torso +
+legs and lands close to the gate (offsetSigned=−21) even though the
+*leading edge at the fire row* is arm, not torso.
+
+`GW ratio = 1.376` and `GATE_TRACE = 0/0→3/19→5/141→5/289→5/458` on
+lap 11 both look GOOD-like (compare lap 6 GOOD: ratio=1.452, trace
+0/0→3/41→5/125→5/169→5/738). None of the four diagnostics captures
+the gap structure specifically.
+
+### Test GG results (2026-04-14) — GAP_STRUCTURE fails as standalone
+
+Test GG ran 10 jogging crossings with `[GAP_STRUCTURE]` compiled in.
+User verdicted 1 GOOD (lap 2) and 9 BAD (laps 1, 3–10). The signal
+**does not cleanly separate**:
+
+- Lap 6 BAD: `nRuns=1 maxGap=0` (single-run textbook pattern) yet
+  fired on arm/elbow in front of body.
+- Lap 2 GOOD: `nRuns=5 maxGap=39` (multi-run with gaps) — any rule
+  "reject if gappy or multi-run" would wrongly kill this.
+- Only lap 9 matches the expected arm-spike signature
+  (`detYRunIdx=0`, `maxGap=46`) — this is the FF-lap-11 twin.
+
+GAP_STRUCTURE is **not** a standalone discriminator. Nine of the BAD
+fires do not show the expected arm-run-plus-gap-plus-torso pattern
+at the gate column.
+
+#### Finding — detY is disconnected from gate-column mask
+
+`detYRunIdx = −1` on 8 of 10 GG laps. The fire Y lies on a row with
+**no mask at all at the gate column**. Example lap 1: detY=163, but
+gate-column runs only start at y=166. Blob minY=96 is driven by motion
+at other columns (arms swung high/wide). The §21 30%-of-blob-height
+formula lands Y in empty space.
+
+This is a separate architectural concern: Y-placement is computed
+from the blob bbox, not from gate-column evidence. It likely
+contributes to the visual "fires on arm" pathology — detY points
+into the arm band above the real torso mask run.
+
+#### Combined candidate rule survives both Test FF and Test GG
+
+```
+reject fire when:
+    |centroidX offsetSigned| > 20        OR
+    (detYRunIdx == 0 AND maxGap ≥ 30)
+```
+
+- Test GG: rejects all 9 BADs (8 via centroid, lap 9 via arm-spike
+  clause), passes lap 2 GOOD.
+- Test FF retrofit: rejects 10 of 10 BADs (9 via centroid, lap 11
+  via arm-spike clause), passes laps 2, 4, 6 GOOD.
+
+Combined coverage: **19 of 19 BADs rejected, 4 of 4 GOODs passed**
+across FF+GG. But dataset is thin on GOODs (4 total) — threshold
+`|offset| > 20` is not well-constrained on the GOOD side.
+
+### Root cause clarification (2026-04-14, post-Test GG)
+
+User pointed out the deeper asymmetry: an arm alone swung through
+the gate **does not** fire (we've tested this), but an arm extended
+forward while the body approaches **does** fire. Why the difference?
+
+**Answer:** our Stage-1 check trusts global blob properties. When the
+arm is alone, the blob is too short (arm is ~60-80 px tall) and fails
+the blob-height filter (≥ 55% of frame = 176 px). When the arm is
+attached to the body, the blob is 200+ px tall and passes. Once the
+blob passes global gates, we check "is there a tall vertical run in
+the gate band?" — the forward-extended arm produces enough vertical
+run (25-75 px in Test GG fires) to satisfy this, so we fire.
+
+**What we never check:** the local geometry *at the gate column*.
+An arm extended across the gate is locally thin (~8-15 px wide at the
+arm's height). A torso at the gate is locally thick (~35-60 px wide
+at chest/belly height). Photo Finish likely uses this local-geometry
+check — it requires the gate region to contain a **torso-thick**
+cross-section, not just "any tall run from the blob that happens to
+touch the gate."
+
+The fix must add a **local** check at the gate column. Three
+candidate shapes:
+
+1. **Local horizontal width at gate** — require the mask's horizontal
+   width around the gate column to be torso-thick (e.g., ≥ 25 px) at
+   the fire Y.
+2. **Frontmost torso column** — scan all columns, find the frontmost
+   column with a tall vertical run (≥ 50% of blob height). Fire only
+   when that column reaches the gate.
+3. **Dense gate-column run** — require the gate column to have a
+   single run spanning ≥ 60% of blob height.
+
+All three are variations of "stop trusting the global blob; check
+the torso is specifically at the gate."
+
+### Next step — Test HH (width calibration with walk blocks)
+
+**Plan:** calibrate the local-width numbers by running walks with
+arms in known positions, so we know the **actual pixel range**
+separating torso-width from arm-width in our 180×320 frames.
+
+Two new diagnostics compiled in (2026-04-14):
+
+- `[LOCAL_WIDTH]` — at the gate column, sample horizontal mask width
+  at 6 Y levels across the blob, plus explicit `wAtDetY` (width at
+  the fire row). Shows how thick the body is at the gate at various
+  heights.
+- `[TORSO_COLUMN]` — scan every column in the blob's X range; find
+  the frontmost column whose longest vertical run ≥ 50% of blob
+  height (the "torso leading edge"). Log its X and signed distance
+  from gate.
+
+**Test HH scenarios (5 crossings each block, front camera):**
+
+- **Block A (baseline — arms at sides):** 5 regular walks through
+  the gate, arms relaxed at sides, no forward extension. Expected:
+  fires GOOD, `wAtDetY` ≈ 35-55 px (torso-thick at chest),
+  `TORSO_COLUMN distSigned` ≈ 0 (torso is at gate).
+- **Block B (deliberate arm-forward):** 5 walks through the gate
+  with **one arm extended forward at chest height**, palm facing
+  gate (as if reaching through). Expected: fires BAD,
+  `wAtDetY` ≈ 8-20 px (arm-thin), `TORSO_COLUMN distSigned`
+  ≈ -20 to -30 (torso still behind gate).
+- **Block C (regular jog):** 5 jogs at normal pace. Mix of GOOD
+  and BAD — matches prior test blocks. Expected to look mostly
+  like Block B (the limb-lead pattern).
+
+**User marks each crossing** (scenario, fire location, chest
+position) and paste the logs plus per-lap verdicts.
+
+**What the test tells us:**
+- If Block A `wAtDetY` and Block B `wAtDetY` distributions have a
+  clean gap (e.g., Block A always ≥ 30, Block B always ≤ 20), we
+  have a robust threshold for the local-width reject rule.
+- If `TORSO_COLUMN distSigned` cleanly separates Block A (≈ 0) from
+  Block B (≈ -25), the torso-leading-edge rule is viable as the
+  primary fire trigger (not just a reject).
+- Block C tells us how well the rule generalizes to real running
+  crossings.
+
+No detection-logic changes this session — diagnostic-only code.
+Fix design waits on Test HH numbers.
+
+### Prior deferred decision point
+
+**Decision 2026-04-14 (Test GG):** User picked Option A (Test GG),
+which ran successfully but showed GAP_STRUCTURE alone is insufficient.
+Centroid-X + arm-spike combined rule appears to cover all 19 BADs and
+4 GOODs observed so far across FF+GG. Three paths forward:
+
+- **Option A′ (ship fix now):** Implement the combined reject rule.
+  Risk: the `|offset| > 20` threshold is tuned on a very small GOOD
+  sample (4 laps) and may reject legitimate crossings in wider
+  conditions (different body shapes, gait, speeds, camera distances).
+- **Option B (one more GOOD-heavy test):** Run Test HH with scenarios
+  designed to elicit GOOD fires (slower jogs, walking, torso-lead
+  gait). Check whether the centroid-X GOOD distribution stays tight
+  at |offset| < 20 or whether we see GOODs with |offset| ≥ 20 that
+  the rule would wrongly reject.
+- **Option C (parallel PF capture, Test II):** One final PF-parallel
+  run on jogging to confirm PF's behavior on arm-spike laps (does
+  PF also fire on arm, or does it somehow wait for torso?). Relevant
+  because the user's USER_MARK X ≈ PF X clarification is about where
+  the *correct* fire would be — not about what PF actually does in
+  borderline cases.
+
+Add one more log line on the fire frame: `[GAP_STRUCTURE]` —
+enumerate the distinct mask runs at the gate column as
+`(startY-endY:length)` tuples, plus the largest interior gap size
+and the index of the run containing detY. Hypothesis: lap-11-like
+fires will show `arm run (~13 tall) + large gap (~30+ px) + torso/leg
+run`, while torso-arrived fires will show one dominant run spanning
+most of the body.
+
+One more diagnostic-only code change. Then repeat 10 regular-jogging
+crossings and check whether `[GAP_STRUCTURE]` cleanly separates
+lap-11-like fires.
+
+### Candidate fix rules (deferred pending Test GG)
+
+If Test GG's gap-structure signal separates lap 11 from the GOODs,
+the fix becomes a two-feature reject rule:
+
+```
+reject fire when:
+  |centroidX offsetSigned| > ~28   OR
+  gate-column mask has (arm_run, gap ≥ G, torso_run) pattern
+```
+
+If Test GG doesn't cleanly separate, fall back to Test HH with
+parallel Photo Finish capture.
+
+Avoid tightening `localSupportFraction` globally — that risks
+regressing Test DD Block A (static-arm) and Block C (torso-leads)
+which currently work fine.
+
+### Related prior hypotheses
+
+- **H-ARM-1 (Run 2026-04-14 Test BB analysis in `test_runs_our_detector.md`):**
+  predicted Y-placement bug from limb-dominant row selection.
+  **Rejected** by Test DD — super-pumped-arms had tightest Δy and
+  Y-placement is not the issue.
+- **H-HEAD-TRUNC (proposed post-Test BB):** hypothesized that
+  unstable blob.minY caused detY variance. **Not confirmed and
+  likely irrelevant** — user clarified Y-precision on torso doesn't
+  matter; the bug is firing on the wrong **body part** / wrong
+  **time**, not Y drift within the torso.
+
+**H-LIMB-LEAD** (renamed from H-ARM-LEAD-X) supersedes both as the
+active hypothesis.
+
+---
+
+### Test HH findings (2026-04-14) — combined rule broken, legs-lead confirmed
+
+**Result: 5 GOOD / 11 BAD across 16 crossings (Block A walk 1–4,
+Block B run+arms 5–15, Block C no-arms 16).** See
+`test_runs_our_detector.md` for per-lap table and diagnostics.
+
+#### 1. H-LIMB-LEAD scope expands: legs count
+
+Walking Block A (laps 1, 3, 4) fired on the **leading leg** at the
+bottom of frame, not the torso. Arms were at sides — no arm lead.
+Blob extends y=63..319 or 73..319 (full frame because leading leg
+reaches floor), and `detY = blob.minY + 0.30 × blobH` lands at
+hip/thigh height. `TORSO_COLUMN` on lap 1 correctly reported
+torso at gateCol−10 (one step behind), but the global-blob gate
+intersection (leg passes gate column first) triggered fire.
+
+**Revised hypothesis statement:** H-LIMB-LEAD = *any limb that
+reaches the gate ahead of the torso triggers an early fire because
+the fire trigger is the global blob's gate intersection, not torso
+evidence.* This covers arms (jogging with arm motion), legs
+(walking), and by extension any forward-reaching body part.
+
+Confirmations for H-LIMB-LEAD now: DD Block B (3/4), EE (5/7),
+FF (10/12), GG (9/10), HH arms (7/11 in Block B, excluding late-fire
+lap 10), HH legs (3/4 in Block A). Five independent test runs, two
+distinct gait types.
+
+#### 2. Combined reject rule from FF+GG is invalidated
+
+Rule: `|offsetSigned| > 20 OR (detYRunIdx==0 AND maxGap≥30)`.
+Against Test HH: 7/16 wrong (4 BAD missed, 3 GOOD wrongly rejected).
+The GOOD population in HH spans `offsetSigned ∈ {−30, −30, −22, −18, −8}`
+— three of five GOODs are beyond the `20` threshold and would be
+wrongly rejected.
+
+Centroid-X separates FF+GG only because the GOOD samples in those
+tests happened to cluster near gate by chance. HH widens the GOOD
+sample and the separation collapses. **Centroid-X is dead as a rule.**
+
+#### 3. `wAtDetY` local-width signal is dead
+
+11 of 16 HH laps have `wAtDetY = 0` because detY is above the
+gate-column mask (the Y-placement bug). Non-zero values overlap
+between GOOD and BAD. Width at detY cannot discriminate when detY
+itself is not anchored to gate evidence.
+
+#### 4. TORSO_COLUMN is the most promising signal but too strict
+
+50% × blobH threshold triggers on only 5 of 16 HH laps. Where it did
+trigger, `distSigned` reads correctly:
+
+- Lap 1 BAD (leg lead walking): torso at gate−10 (correctly says
+  "not yet").
+- Lap 10 BAD (late fire): torso at gate+7 (correctly says "already
+  past").
+- Lap 16 GOOD (no-arm): torso at gate−6 (correctly says "at gate").
+
+**Cause of low trigger rate:** motion-differenced binary mask
+fragments the torso into short vertical runs. The 50%-of-blobH
+threshold assumes a solid mask; our mask is sparse within the torso.
+Candidate relaxation: drop to ~30% × blobH or ~30 px absolute.
+
+#### 5. Two separable bugs, not one
+
+The pre-HH framing treated limb-lead as a single bug. HH shows
+there are two:
+
+- **Bug A — Fire timing:** detector fires when the blob (including
+  limbs) intersects the gate, not when the torso does. Root cause
+  is in the Stage-1 gate-crossing check.
+- **Bug B — Fire Y placement:** `detY = blob.minY + 0.30 × blobH`
+  lands in empty space (no gate-column mask) on 11 of 16 laps. Root
+  cause is the `torsoFraction` formula's unawareness of gate-column
+  evidence. This explains why the user sees "dot on leg/arm"
+  visually even when timing is roughly right.
+
+Bug B is independent of Bug A and can be fixed separately by
+anchoring detY to the longest gate-column run. Fixing Bug B will
+not fix Bug A but will improve visual reporting.
+
+### Next step (active decision point, 2026-04-14)
+
+Reject-rule approach exhausted. All threshold-only rules tried
+(centroid-X, wAtDetY, GAP_STRUCTURE standalone) fail once the test
+population widens. The fix must be **structural**: change what
+triggers the fire, not just add a reject filter downstream.
+
+Three viable paths (user to pick):
+
+#### Option A — Relaxed TORSO_COLUMN + Test II (recommended)
+
+Lower the `torsoRunMin` from `max(30, blobH/2)` to `max(20, blobH/3)`
+in diagnostic code (diagnostic-only, no trigger change yet). Run
+Test II: 4 walks arms-sides, 8 jogs with arm motion, 4 no-arm jogs
+(16 laps, same shape as HH). Goals:
+
+- Does TORSO_COLUMN now fire on ≥ 80% of laps? (If not, the fragmentation
+  is too severe to rely on this signal — fallback to Option B.)
+- Does `|distSigned|` cleanly separate GOOD from BAD across the
+  three blocks? Specifically: do walking Block A BAD laps show
+  `distSigned` noticeably negative (torso behind) while GOOD laps
+  show `distSigned ≈ 0`?
+- If signal is clean, the fix becomes: **gate the fire on
+  `|torsoDistSigned| < ~10`** instead of on global blob gate
+  intersection.
+
+No trigger change this pass — one more diagnostic cycle. Cheapest path.
+
+#### Option B — Parallel Photo Finish capture on walking (Test II′)
+
+Run Test HH's walking block again with PF capturing simultaneously.
+Did PF also fire on leading-leg frames? If yes, our behavior matches
+PF and the user's acceptance criteria shift (leading-leg fires are
+actually correct). If no, PF waits for torso — confirming the
+direction for Option A's fix.
+
+The user's "USER_MARK X ≈ PF X" clarification suggests PF-parallel
+may be redundant, but we don't actually know what PF does on
+walking leg-lead — only on jogging arm-lead (Test CC), where PF did
+*not* fire on arms.
+
+#### Option C — Ship Y-placement fix (Bug B) independently
+
+Change detY to: midpoint of the longest gate-column vertical run
+(fall back to current formula if no gate-col run exists). Does not
+fix limb-lead, but fixes the visual dot-on-leg/arm reports on any
+lap where a gate-col run exists at all.
+
+Risk: on pure leg-lead laps (Block A BAD), there may be no
+gate-column run at the time of fire (leg has already passed, torso
+hasn't arrived) — then we fall back to the buggy formula anyway.
+Need to verify on HH data before shipping.
+
+**Recommendation: Option A.** Structural fix for Bug A is more valuable
+than a cosmetic fix for Bug B. Option C can be bundled with the
+Option A fix after TORSO_COLUMN is validated as a reliable trigger.
+
+### Candidate fix rules (revised after Test HH)
+
+**Old (invalidated):**
+```
+reject fire when:
+  |centroid offsetSigned| > 20 OR (detYRunIdx==0 AND maxGap≥30)
+```
+
+**New direction (to validate in Test II):**
+```
+fire only when:
+  TORSO_COLUMN.found == true AND
+  |TORSO_COLUMN.distSigned| <= ~10
+```
+
+That is, flip from "global blob at gate → fire, unless rejected" to
+"torso column at gate → fire." Global blob gate intersection becomes
+a necessary-but-not-sufficient precondition. The trigger is torso
+evidence specifically.
+
+Key unknowns Test II must answer:
+- Fire rate of TORSO_COLUMN with relaxed threshold.
+- Does `distSigned` separate GOOD from BAD cleanly?
+- Do Block A walking laps (no arm lead) still show torso-behind-gate
+  at the current fire frame?
+
+### Related invalidated approaches (this branch)
+
+- Centroid-X threshold: FF+GG → seemed promising (19/19 BADs, 4/4 GOODs),
+  HH → fails (overlap between GOOD and BAD distributions).
+- Local-width at detY: HH → 11/16 laps have `wAtDetY=0`, signal dead.
+- GAP_STRUCTURE standalone: GG → lap 6 BAD and lap 2 GOOD inseparable.
+- Arm-spike clause (detYRunIdx==0 AND maxGap≥30): unreliable once
+  detY itself is not gate-anchored.
+
+---

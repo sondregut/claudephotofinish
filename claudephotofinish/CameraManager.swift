@@ -34,7 +34,7 @@ final class CameraManager: NSObject, ObservableObject {
     /// `nil` means "use the active format's built-in default" (sets
     /// `activeMaxExposureDuration = .invalid`). This is the lever for
     /// matching Photo Finish sharpness — short cap + auto-ISO, same as PF.
-    @Published var maxExposureCapMs: Double? = 4.0 {
+    @Published var maxExposureCapMs: Double? = 16.0 {
         didSet { applyExposureSettings() }
     }
     @Published var isManualExposure: Bool = false {
@@ -129,6 +129,7 @@ final class CameraManager: NSObject, ObservableObject {
 
     @objc private func handleSessionInterruptionEnded(_ note: Notification) {
         slog("[CAMERA_CFG] interruption ended, reapplying exposure")
+        engine.resetWarmup()
         processingQueue.async { [weak self] in
             self?.applyExposureSettings()
             DispatchQueue.main.async { self?.logCurrentConfig() }
@@ -585,8 +586,8 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
             return
         }
 
-        // Beep on detection (dispatch off processing queue to avoid blocking)
-        DispatchQueue.main.async { AudioServicesPlaySystemSound(1052) }
+        // Beep on detection (vibration disabled)
+        // DispatchQueue.main.async { AudioServicesPlaySystemSound(1052) }
 
         // Pick the frame closest to the actual gate crossing.
         // fraction < 0.5 → body was closer to gate in frame N-1 (previous frame)
@@ -632,6 +633,7 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
                     userMarkedPoint: nil
                 )
                 self.crossings.append(record)
+                AudioServicesPlaySystemSound(1052)
                 slog("[CROSSING] #\(record.crossingNumber) at \(String(format: "%.3f", record.time))s")
             }
         }

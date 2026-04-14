@@ -74,6 +74,10 @@ If a proposed change risks any of these, flag it before implementing and discuss
 - **`PhotoFinish_Accuracy_Paper.pdf`** — Academic paper (Android-focused, not ground truth for iPhone)
 - **`notes_*.md`** — CV research notes (frame differencing, background subtraction, blob geometry, iOS camera pipeline)
 
+## Stale worktrees — do not edit
+
+`.claude/worktrees/cranky-bouman/` and `.claude/worktrees/elated-engelbart/` are from April 6–7 and contain outdated `DetectionEngine.swift` (pre-§19, pre-§21). Do not open or edit files in those paths. Do not delete them either — per global rule, worktrees may belong to another agent session.
+
 ## Working Principles
 
 - **Pure geometry is the leading theory** — torso-like detection behavior is treated as emergent from blob geometry, not a semantic body detector
