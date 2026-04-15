@@ -3883,12 +3883,97 @@ changing anything.
 
 ### Status
 
-Proposed. Awaiting user choice among A / B / C / D. Code
-change held. My default recommendation if the user says "your
-call": **Option B** — smallest regression, largest improvement,
-threshold documented as tunable.
+Shipped 2026-04-15 as Option A (30%-from-top-of-picked on every
+fire). Implementation:
+
+```swift
+torsoDetY = run.startY
+    + Int(Float(run.endY - run.startY) * 0.30)
+```
+
+Rationale given by external reviewer: scale-invariant (works for
+close and distant crossings identically because the fraction is
+of the run's own length, not a pixel constant). Hybrid threshold
+(Option B) was rejected as an arbitrary knob; picker fix (Option
+C, L3's +53 contribution) is addressed separately by §31.
+
+Shipped alongside §31 so Test QQ measures both together.
 
 ---
+
+## §31 H-PICKER-TORSO-BIAS (2026-04-15)
+
+Test PP L3 f518 showed a head-snag picker bug: merged qualifiers
+`[72..122:51, 145..199:55]`. The topmost (idx 0 = head/upper-
+shoulder fragment) was picked, and the torso qualifier (idx 2
+= mid-chest) was ignored. User-marked torso y=150 sits inside
+idx 2 (145..199), not idx 0 (72..122). detY=97 landed on the
+head, Δy=+53.
+
+The head and the chest have different horizontal profiles: the
+head is vertically solid but horizontally narrow; the chest is
+both vertically solid and horizontally wide. If we probe the
+horizontal strip width at each qualifier's centerY, the head
+fragment should show a narrow width while the torso run shows a
+wide width.
+
+### Rule
+
+For each qualifying merged run, compute the horizontal strip
+width at its centerY (the same scan the §29 EMPTY_STRIP probe
+uses). If multiple qualifiers exist, compare the topmost
+qualifier's width to the widest qualifier's width:
+
+- If `topmost_width * 2 < max_width`, the topmost is a head-snag
+  candidate. Move the widest qualifier to the front of the
+  picker order.
+- Otherwise, keep topmost first (previous §29 behavior).
+
+The §29 EMPTY_STRIP fallback still iterates the remaining
+qualifiers in order if the chosen run's strip is empty.
+
+### Log format
+
+- `[GATE_RUNS]` adds `widths=[idxN:wM,…] headSnag=Y|N`.
+- `[EMPTY_STRIP_PROBE]` reports `centerY=` and `width=` (was
+  `detY=` and `stripWidth=`).
+
+### L3 f518 caveat
+
+HRUN_PROFILE row 97 (center of idx 0) shows width 43 — an arm
+sweep at that specific row puffs idx 0 wider than idx 2 (center
+row 172, width 16). Under strict "width at centerY", the rule
+as specified does NOT fire on L3 and the head-snag persists.
+
+Shipped as specified per reviewer directive. Test QQ will
+confirm whether L3 remains broken; if so, §31 gets a follow-up
+(e.g., sample multiple rows within each run, use median width,
+or add an anti-correlation check against `[TORSO_COLUMN]`).
+
+### Behavioral-requirements check
+
+1. Torso crossings: helps whenever a head fragment qualifies
+   above a wider torso run.
+2. Hand swipes: unaffected — single short run, doesn't qualify.
+3. Leg-only: unaffected — torso-bias prefers wider mass, never
+   a leg swing.
+4. Lighting: unaffected.
+5. Fast/slow: unaffected — scale-invariant.
+6. Forward lean: unaffected.
+7. Front/rear cam: unaffected.
+8. Double-fire: unaffected.
+9. Environmental: unaffected.
+
+### Status
+
+Shipped 2026-04-15 alongside §30. Build verified. Test QQ
+next — same 10-crossing protocol as Test PP, parallel PF.
+Expected:
+- L5, L8, L9, L11 detY shifts up into torso region (§30 win).
+- L2, L4 detY shifts up — may regress if the picked run is
+  already short.
+- L3 likely still on head (caveat above); if so, §31 follow-up.
+- Hand-swipe + arm-only scenarios should still reject cleanly.
 
 ---
 

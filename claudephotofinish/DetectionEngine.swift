@@ -241,7 +241,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=topmost_with_fallback",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, gateBandHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -673,10 +673,6 @@ final class DetectionEngine {
             let minRequired = max(torsoRunAbsMin,
                                   min(torsoRunAbsMax,
                                       Int(Float(blobH) * torsoRunHeightFrac)))
-            // §29 H-PICKER-TOPMOST-WITH-FALLBACK: revert §28 — pick the
-            // topmost qualifying merged run. If its horizontal strip at
-            // centerY is empty (gap-fused head/shoulder fragment), advance
-            // to the next qualifier before rejecting the fire.
             let qualifyingIndices = frameGateRunsMerged.indices.filter {
                 (frameGateRunsMerged[$0].endY - frameGateRunsMerged[$0].startY + 1) >= minRequired
             }
@@ -688,8 +684,20 @@ final class DetectionEngine {
                 .joined(separator: ",")
             let qualifyingCount = qualifyingIndices.count
 
-            var pickedIdx: Int? = nil
-            for (tryN, idx) in qualifyingIndices.enumerated() {
+            // §31 H-PICKER-TORSO-BIAS. Probe horizontal strip width at
+            // each qualifier's centerY. If the topmost qualifier is much
+            // narrower than the widest qualifier below (head-snag
+            // pattern), move the widest to the front of the picker
+            // order. The §29 EMPTY_STRIP fallback still walks the
+            // remaining qualifiers in Y-order if the chosen run's strip
+            // is empty at centerY.
+            struct QualProbe {
+                let idx: Int
+                let centerY: Int
+                let width: Int
+            }
+            var quals: [QualProbe] = []
+            for idx in qualifyingIndices {
                 let run = frameGateRunsMerged[idx]
                 let cy = (run.startY + run.endY) / 2
                 var lx = gateColumn
@@ -699,20 +707,49 @@ final class DetectionEngine {
                 xi = gateColumn + 1
                 while xi < W && maskBuf[cy * W + xi] != 0 { rx = xi; xi += 1 }
                 let sw = (rx - gateColumn) + (gateColumn - lx)
-                if sw > 0 {
-                    pickedIdx = idx
-                    torsoDetY = cy
+                quals.append(QualProbe(idx: idx, centerY: cy, width: sw))
+            }
+            let widthsDesc = quals
+                .map { "idx\($0.idx):w\($0.width)" }
+                .joined(separator: ",")
+            var headSnagApplied = false
+            if quals.count > 1 {
+                let maxW = quals.map { $0.width }.max() ?? 0
+                let topW = quals[0].width
+                if maxW > 0 && topW * 2 < maxW,
+                   let widestOffset = quals.indices.max(by: {
+                       quals[$0].width < quals[$1].width
+                   }),
+                   widestOffset != 0 {
+                    let widest = quals.remove(at: widestOffset)
+                    quals.insert(widest, at: 0)
+                    headSnagApplied = true
+                }
+            }
+
+            var pickedIdx: Int? = nil
+            for (tryN, q) in quals.enumerated() {
+                if q.width > 0 {
+                    pickedIdx = q.idx
+                    let run = frameGateRunsMerged[q.idx]
+                    // §30 H-DETY-FRACTION-INSIDE-PICKED-RUN. Anatomical
+                    // anchor: 30% from the top of the picked merged
+                    // run. Scale-invariant (works for close and distant
+                    // crossings) because the fraction is of the run's
+                    // own length, not a pixel constant.
+                    torsoDetY = run.startY
+                        + Int(Float(run.endY - run.startY) * 0.30)
                     if tryN > 0 {
                         slog(String(format:
                             "[EMPTY_STRIP_FALLBACK] frame=%d triedQualifiers=%d pickedIdx=%d detY=%d",
-                            frameIndex, tryN, idx, cy))
+                            frameIndex, tryN, q.idx, torsoDetY))
                     }
                     break
                 } else {
                     slog(String(format:
-                        "[EMPTY_STRIP_PROBE] frame=%d idx=%d detY=%d stripWidth=0 try=%d advance=%@",
-                        frameIndex, idx, cy, tryN,
-                        (tryN + 1 < qualifyingIndices.count) ? "Y" : "N"))
+                        "[EMPTY_STRIP_PROBE] frame=%d idx=%d centerY=%d width=0 try=%d advance=%@",
+                        frameIndex, q.idx, q.centerY, tryN,
+                        (tryN + 1 < quals.count) ? "Y" : "N"))
                 }
             }
 
@@ -720,15 +757,19 @@ final class DetectionEngine {
                 let picked = frameGateRunsMerged[idx]
                 let pickedLen = picked.endY - picked.startY + 1
                 slog(String(format:
-                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d pickedIdx=%d pickedLen=%d detY=%d blobH=%d minReq=%d mergeGap=%d fire=Y",
+                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d widths=[%@] headSnag=%@ pickedIdx=%d pickedLen=%d detY=%d blobH=%d minReq=%d mergeGap=%d fire=Y",
                     frameIndex, runsDesc, mergedDesc,
-                    qualifyingCount, idx, pickedLen,
+                    qualifyingCount, widthsDesc,
+                    headSnagApplied ? "Y" : "N",
+                    idx, pickedLen,
                     torsoDetY, blobH, minRequired, gateRunMergeMaxGap))
             } else {
                 slog(String(format:
-                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d pickedIdx=none blobH=%d minReq=%d mergeGap=%d fire=N",
+                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d widths=[%@] headSnag=%@ pickedIdx=none blobH=%d minReq=%d mergeGap=%d fire=N",
                     frameIndex, runsDesc, mergedDesc,
-                    qualifyingCount, blobH, minRequired, gateRunMergeMaxGap))
+                    qualifyingCount, widthsDesc,
+                    headSnagApplied ? "Y" : "N",
+                    blobH, minRequired, gateRunMergeMaxGap))
                 if qualifyingCount == 0 {
                     let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
                     logReject("gate_col_run",
