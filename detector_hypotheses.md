@@ -3543,8 +3543,8 @@ swipes are far below both 50 and 55.
 
 ### Status
 
-Proposed, not shipped. Test OO will pair this with §28 and
-re-run the sprint scenario.
+Shipped 2026-04-15 alongside §28 (build verified). Test OO will
+re-run the Test NN 8-lap sprint + walk scenario with parallel PF.
 
 ---
 
@@ -3617,7 +3617,7 @@ for (i, run) in frameGateRunsMerged.enumerated() {
 
 ### Status
 
-Proposed, not shipped. Test OO will combine §27 + §28 and
+Shipped 2026-04-15 alongside §27 (build verified). Test OO will
 compare against Test NN laps 2, 4, and the positive controls
 (laps 1, 3, 5, 6, 7, 8).
 

@@ -126,6 +126,13 @@ final class DetectionEngine {
     private let useLeadingEdgeTrigger: Bool = true
     private let torsoRunAbsMin: Int = 50          // absolute floor for qualifying run length (px)
     private let torsoRunHeightFrac: Float = 0.25  // fraction-of-blobH floor
+    // §27 H-FLOOR-CAP (2026-04-15). Cap the fraction-of-blobH floor so
+    // an inflated bbox (raised arms + stride + hair/feet at frame edge)
+    // can't push minReq above a sane torso ceiling. Test NN laps 2/4
+    // showed merged runs of 54 and 44 rejected against floors of 62 and
+    // 59 (blobH 249 and 238) when the real torso at the gate column was
+    // already a valid torso-height run.
+    private let torsoRunAbsMax: Int = 55
 
     // §25 H-GATE-RUN-MERGE-SMALL-GAPS (2026-04-15). Merge adjacent
     // gate-column vertical runs whose pixel gap ≤ this value before
@@ -231,7 +238,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=largest",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, gateBandHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -241,7 +248,7 @@ final class DetectionEngine {
             torsoFraction,
             spikeRatioThreshold, warmupFrames, cooldown,
             useLeadingEdgeTrigger ? "ON" : "off",
-            torsoRunAbsMin, torsoRunHeightFrac, gateRunMergeMaxGap
+            torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap
         ))
     }
 
@@ -500,8 +507,11 @@ final class DetectionEngine {
             // If yes, apply lenient fill/aspect (sprint-lunge-safe); if no,
             // apply strict (arm-swipe-safe). Only active under the shipped
             // leading-edge flag — false branch keeps strict unconditionally.
+            // §27 Apply the same cap the §23 fire gate uses so the
+            // two-tier prefilter tier decision stays consistent.
             let qualifyingMin = max(torsoRunAbsMin,
-                                    Int(Float(comp.height) * torsoRunHeightFrac))
+                                    min(torsoRunAbsMax,
+                                        Int(Float(comp.height) * torsoRunHeightFrac)))
             var hasQualifyingRun = false
             var longestQRLen = 0
             // §25 Use merged runs (adjacent runs with gap ≤ gateRunMergeMaxGap
@@ -655,11 +665,26 @@ final class DetectionEngine {
 
         if useLeadingEdgeTrigger {
             let blobH = candidate.comp.height
-            let minRequired = max(torsoRunAbsMin, Int(Float(blobH) * torsoRunHeightFrac))
+            // §27 H-FLOOR-CAP: cap the fraction-of-blobH floor so an
+            // inflated bbox can't push minReq past a torso ceiling.
+            let minRequired = max(torsoRunAbsMin,
+                                  min(torsoRunAbsMax,
+                                      Int(Float(blobH) * torsoRunHeightFrac)))
             // §25 Fire gate evaluates merged runs; logs emit both raw and
             // merged views so the effect of merging is visible per frame.
-            let qualifyingIdx = frameGateRunsMerged.firstIndex {
-                ($0.endY - $0.startY + 1) >= minRequired
+            // §28 H-PICKER-LARGEST: when multiple merged runs qualify,
+            // pick the longest rather than the topmost. Topmost can be a
+            // gap-fused head/shoulder fragment whose horizontal strip is
+            // empty, causing the downstream EMPTY_STRIP reject to kill a
+            // valid fire (Test NN lap 4 f401).
+            var qualifyingIdx: Int? = nil
+            var qualifyingLen = 0
+            for (i, run) in frameGateRunsMerged.enumerated() {
+                let len = run.endY - run.startY + 1
+                if len >= minRequired && len > qualifyingLen {
+                    qualifyingIdx = i
+                    qualifyingLen = len
+                }
             }
             let runsDesc = frameGateRuns
                 .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
