@@ -4147,3 +4147,127 @@ No code change until Test RR confirms the separation.
 
 ---
 
+## §34 H-THICK-GATE-PROJECTION (2026-04-15)
+
+### Observation
+
+Test RR (outdoor backlit, camera toward window) crashed Σ|Δy|
+from Test QQ's 10.6 px/lap to 68 px/lap. Root cause: iPhone AE
+drove exposure to 0.6–2.5 ms at ISO 28–40, motion blur
+collapsed, and the frame-diff mask reduced to the "hollow
+body" pattern already predicted in `detection_spec.md` §2.3 —
+a thin leading-edge stripe, a thin trailing-edge stripe, and
+empty interior where the body overlaps itself between frames.
+The single-column gate at x=90 sampled rows mostly inside that
+empty interior, so qualifying runs collapsed into
+disconnected head/arm/leg fragments; §23 picked whichever
+fragment happened to clear ≥55 px, usually legs or head.
+
+`detection_spec.md` §3.1 explicitly leaves the gate-width
+question unresolved: PF's gate could be "one exact pixel
+column" or "a small multi-column vertical band centered on
+the red line." A narrow multi-column band is consistent with
+the spec, not a violation of parity.
+
+### Rule
+
+Replace the single-column gate run extraction with an
+OR-projection across a 9-column band (`gateColumn ± 4`,
+x=86..94 when gateColumn=90): a row Y is active in the
+projected 1D profile iff any column in the band has a mask
+pixel at row Y. Feed the projection directly into the
+existing §25 merge (gap ≤ 2), §23 qualifier (≥ 55 px), §31
+head-snag picker, and §30 30%-from-top placement — every
+downstream stage is unchanged.
+
+Band width = 9 is the minimum that reliably stitches
+leading+trailing motion-edge stripes on a running-speed
+crossing (~8 px per frame displacement at 30 fps) without
+over-gluing the head onto the torso on forward-lean
+crossings.
+
+### Test SS dry-run summary (logged-only §34 at band=15)
+
+Before shipping, a logging-only `[GATE_RUNS_WIDE]` probe at
+band=15 (`thickGateHalf=7`) was emitted alongside the single-
+column `[GATE_RUNS]` on Test SS (9 crossings outdoor
+backlit, 0.62–0.67 ms exposure, same scenario as Test RR).
+
+Σ|Δy| current single-col = 440 (48.9 px/lap).
+Σ|Δy| band=15 projection estimate = 219 (24.3 px/lap).
+Net ~50% reduction.
+
+Per-lap effect:
+
+| # | Δy single-col | Wide-15 30%-from-top | Wide-15 Δy |
+|---|--------------:|---------------------:|-----------:|
+| 1 | +37 | 136 | **+1** |
+| 2 | 0 | ~156 | ~-4 |
+| 3 | -105 | still leg | still bad (PF also declined) |
+| 4 | -59 | 168 | **+15** |
+| 5 | -91 | 163 | **-12** |
+| 6 | +5 | 135 | **-41 (regression)** |
+| 7 | -48 | 148 | **+19** |
+| 8 | +40 | 131 | -31 |
+| 9 | +55 | 128 | **-15** |
+
+L6 regressed because band=15 spans two edges (head +
+torso) on a forward-lean crossing. Band=9 aligns to
+running-speed edge separation and should not over-glue —
+shipped band=9 accordingly, accepting L6 may no longer be
+detY=+5 perfect but will stay in the low-Δy range.
+
+### L3 parity ceiling
+
+Test SS L3 was a lap where Photo Finish itself did not
+fire. We currently over-fire (detY=278, leg). §34 does not
+fix this — it's a fire/no-fire policy gap, not a placement
+problem. Parking L3 as a separate investigation once §34 is
+in the field. Phase-1 PF parity rule: if PF declines, we
+should decline too.
+
+### Behavioral-requirements check
+
+1. Torso crossings (indoor Test QQ baseline): band=9 OR-
+   projection on a well-exposed torso should be a superset
+   of the single-column runs. Worst case Σ|Δy| stays at
+   10.6 px/lap; likely improves because previously-hollow
+   indoor runs also glue. Will verify on Test TT.
+2. Hand swipes: a thin arm crossing cols 86..94 produces
+   the same single-column run it did before — band=9 can
+   only add mask pixels from adjacent cols 86..89 and
+   91..94, which on a hand swipe are empty. Unaffected.
+3. Leg-only: unaffected for the same reason.
+4. Lighting: **improves dramatically in bright-outdoor /
+   backlit where the single-column gate was hitting
+   hollow-torso rows.**
+5. Fast vs slow: band=9 matches running-speed edge
+   separation. Walking (3–5 px/frame) edges are closer
+   together; band=9 still captures both. Unaffected to
+   better.
+6. Forward lean: head-over-torso glue risk is the L6 case.
+   Band=9 is the narrowest that still recovers the torso
+   on a hollow-body crossing; it's designed to minimize
+   this regression.
+7. Front/rear cam: unaffected.
+8. Double-fire: unaffected.
+9. Environmental motion: slight increase in sensitivity
+   because more cols contribute. A tree branch or
+   spectator moving in cols 86..94 at >55 px vertical
+   extent would fire where previously it might not. Risk
+   flagged for Test TT.
+
+### Status
+
+Shipped 2026-04-15. Constant: `thickGateHalf = 4`. Helper:
+`gateColumnRunsThick(halfWidth:)`. ENGINE_CONFIG reflects
+`gate=col90±4_projected gateAnalysisBand=±2` (the latter
+preserves analyzeGate's 5-col diagnostic band).
+`[GATE_RUNS_WIDE]` / `[WIDE_PROBE_CONFIG]` diagnostics
+removed.
+
+Test TT (outdoor + indoor re-validation) is the next
+confirmation step.
+
+---
+

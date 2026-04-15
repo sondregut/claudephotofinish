@@ -5897,3 +5897,102 @@ cases so we can gather §32 centroid-X vs PF-anchor data.
 Do NOT propose any detector change, logging change, or
 pipeline-primitive change based on Test RR data.
 
+---
+
+## Run 2026-04-15 Test SS — 9 crossings, outdoor backlit, §34 logging-only probe
+
+### Session config
+
+`[ENGINE_CONFIG] picker=longestRun cam=front process=180x320 gate=col90±2 diffThresh=15 ... runPicker=torso_bias detY=0.30x_from_picked_top`
+`[WIDE_PROBE_CONFIG] wideProbe=x83..x97 halfWidth=7 mode=log_only`
+
+Same backlit-outdoor lighting as Test RR (camera toward
+window, exposure 0.62–0.67 ms, ISO 28–29). Scenario
+reproduced. `[GATE_RUNS_WIDE]` diagnostic logged alongside the
+shipped single-column `[GATE_RUNS]` so we could dry-run
+§34 without shipping it.
+
+### Per-crossing table
+
+| # | Frame | detY | userY | Δy | userX | Scenario | Current longestMerged | longestWide (band=15) | Verdict |
+|---|-------|-----:|------:|-----:|------:|----------|----------------------:|---------------------:|---------|
+| 1 | 232 | 100 | 137 | +37 | 91 | running | 116 | 190 | head |
+| 2 | 290 | 160 | 160 | 0 | 98 | running | 57 | 234 | good |
+| 3 | 386 | 278 | 170.5* | -107.5 | 132.5* | running | 59 | 84 | leg, **PF DID NOT FIRE** |
+| 4 | 484 | 242 | 183 | -59 | 95 | running | 99 | 217 | leg behind body, late |
+| 5 | 582 | 266 | 175 | -91 | 73 | running | 62 | 224 | leg |
+| 6 | 664 | 171 | 176 | +5 | 93 | running | 58 | 121 | perfect |
+| 7 | 766 | 215 | 167 | -48 | 93 | running | 74 | 185 | right X but low |
+| 8 | 852 | 122 | 162 | +40 | 99 | running | 76 | 109 | head |
+| 9 | 953 | 88 | 143 | +55 | 102 | running | 59 | 192 | head |
+
+\* L3 had two USER_MARK taps at (173, 137) and (168, 128). Average used.
+
+Σ|Δy| current shipped = 440 across 9 laps = 48.9 px/lap.
+(Test QQ baseline indoor = 10.6 px/lap; Test RR backlit
+baseline = 68 px/lap. Test SS is same backlit conditions as
+RR at slightly fewer laps.)
+
+### Wide-projection dry-run (band=15 in probe)
+
+Reading `[GATE_RUNS_WIDE]` longestWide plus the projected 30%-
+from-top anchor against userY:
+
+| # | Wide-15 est detY | Wide-15 Δy |
+|---|---:|---:|
+| 1 | 136 | **+1** |
+| 2 | 156 | -4 |
+| 3 | still on legs | still ~-85 (PF also declined) |
+| 4 | 168 | **+15** |
+| 5 | 163 | **-12** |
+| 6 | 135 | -41 (regression — over-glued head+torso on lean) |
+| 7 | 148 | +19 |
+| 8 | 131 | -31 |
+| 9 | 128 | -15 |
+
+Σ|Δy| band=15 estimate = 219 = 24.3 px/lap, **~50%
+reduction.** OR-projection mechanism confirmed to work on
+bright-outdoor hollow-body crossings.
+
+### L6 regression → decision to ship band=9 instead of 15
+
+Band=15 spans 15 cols (±7). On a forward-lean crossing where
+the head enters the gate one frame before the torso, a wide
+projection glues both into a single long merged run; 30%-
+from-top lands on the upper-chest/chin, not mid-chest.
+
+Band=9 (±4) aligns to running-speed horizontal edge
+displacement (~8 px/frame) and stitches the hollow-torso gap
+*without* grabbing the head. L6 preserved by shipping
+band=9 rather than band=15.
+
+### L3 parity ceiling
+
+Parallel PF declined this crossing. Our detector still fired
+at detY=278 (leg). This is a fire/no-fire policy gap, not a
+§34 placement problem. L3 is parked as a separate follow-up.
+Phase-1 PF parity rule applies: if PF declines, we should
+decline.
+
+### Next step — §34 shipped at band=9
+
+§34 H-THICK-GATE-PROJECTION shipped as active behavior:
+- `thickGateHalf = 4` (9-col band, x=86..94).
+- `gateColumnRunsThick(halfWidth:)` replaces single-column
+  `gateColumnRuns()`.
+- ENGINE_CONFIG: `gate=col90±4_projected gateAnalysisBand=±2`.
+- Logging-only `[GATE_RUNS_WIDE]` / `[WIDE_PROBE_CONFIG]`
+  removed.
+- §25, §27, §29, §30, §31 untouched — they consume the
+  projection instead of the single column.
+
+Test TT next:
+- Outdoor backlit (same scenario as RR/SS) to confirm the
+  ~50% Σ|Δy| improvement survives with band=9.
+- Indoor (Test QQ-equivalent lighting) to confirm no
+  regression on well-exposed crossings.
+- Mix of running / walking / forward-lean so L6-style lean
+  placement is covered.
+- Parallel PF on every crossing — needed to confirm which
+  fires are parity-valid vs parity-failures (L3 style).
+

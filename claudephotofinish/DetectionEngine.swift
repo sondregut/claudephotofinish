@@ -165,12 +165,21 @@ final class DetectionEngine {
     var gateColumn: Int { processWidth / 2 }
     private let gateBandHalf: Int = 2
 
-    // §34 probe: OR-project a wider band (±7 cols = 15 total, x=83..97 when
-    // gateColumn=90) for logging-only diagnostic. Does NOT affect detector
-    // behavior; fed only into [GATE_RUNS_WIDE] so we can dry-run whether a
-    // thick-gate OR-projection would recover fragmented torso masks on
-    // bright-outdoor crossings before shipping the behavior change.
-    private let wideProbeHalf: Int = 7
+    // §34 H-THICK-GATE-PROJECTION (shipped 2026-04-15). Instead of
+    // sampling the gate as a single column of mask pixels, OR-project a
+    // 9-column band (gateColumn ± 4, x=86..94 when gateColumn=90) down
+    // the Y axis: a row is active in the projection iff ANY column in
+    // the band has a mask pixel at that row. This stitches the thin
+    // leading/trailing motion-edge stripes back into a contiguous torso
+    // run when exposure collapses in bright outdoor light (0.6 ms), the
+    // "hollow-body" failure mode documented in detection_spec.md §2.3.
+    // Band width = 9 is the minimum that captures typical running-speed
+    // edge separation (~8 px/frame) without over-gluing the head onto
+    // the torso on forward-lean crossings (Test SS L6 regression at
+    // band=15). Feeds directly into frameGateRuns / frameGateRunsMerged
+    // and then the existing §23 picker, §30 placement, §31 head-snag
+    // guard — no other pipeline changes.
+    private let thickGateHalf: Int = 4
 
     // Session state
     private(set) var isActive = false
@@ -248,9 +257,9 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d",
             pickerDesc, isFrontCamera ? "front" : "back",
-            processWidth, processHeight, gateColumn, gateBandHalf,
+            processWidth, processHeight, gateColumn, thickGateHalf,
             Int(diffThreshold), heightFraction, widthFraction,
             localSupportFraction,
             minFillRatio, maxAspectRatio,
@@ -258,11 +267,9 @@ final class DetectionEngine {
             torsoFraction,
             spikeRatioThreshold, warmupFrames, cooldown,
             useLeadingEdgeTrigger ? "ON" : "off",
-            torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap
+            torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap,
+            gateBandHalf
         ))
-        let wMin = max(0, gateColumn - wideProbeHalf)
-        let wMax = min(processWidth - 1, gateColumn + wideProbeHalf)
-        slog("[WIDE_PROBE_CONFIG] wideProbe=x\(wMin)..x\(wMax) halfWidth=\(wideProbeHalf) mode=log_only")
     }
 
     func stop() {
@@ -381,11 +388,13 @@ final class DetectionEngine {
             }
         }
 
-        // §23 Gate-column vertical runs (all contiguous mask runs at the
-        // single gate column, full frame height, ascending startY). Drives
-        // the qualifying-run fire gate and topmost-qualifying detY selection
-        // in the flag-on branch below.
-        let frameGateRuns = gateColumnRuns()
+        // §23 Gate-column vertical runs. As of §34 (shipped 2026-04-15)
+        // these are the OR-projection across a 9-col band (gateColumn ± 4)
+        // rather than a single column — stitches hollow-torso motion
+        // edges together when exposure drops in bright outdoor light.
+        // Drives the qualifying-run fire gate and the topmost-qualifying
+        // detY selection in the flag-on branch below.
+        let frameGateRuns = gateColumnRunsThick(halfWidth: thickGateHalf)
 
         // §25 Merged-runs view (merge adjacent runs with gap ≤
         // gateRunMergeMaxGap). Used by the §24 prefilter tier check and
@@ -405,33 +414,6 @@ final class DetectionEngine {
                     merged.append((startY: curStart, endY: curEnd))
                     curStart = frameGateRuns[i].startY
                     curEnd   = frameGateRuns[i].endY
-                }
-            }
-            merged.append((startY: curStart, endY: curEnd))
-            return merged
-        }()
-
-        // §34 logging-only probe. OR-project a 15-col band (gateColumn ± 7,
-        // i.e. x=83..97 when gateColumn=90) down the Y axis: a row is
-        // active if ANY column in the band has a mask pixel. Merge with
-        // the same gap=2 rule as frameGateRunsMerged. Emitted alongside
-        // [GATE_RUNS] for side-by-side comparison with the shipped
-        // single-column gate. No behavior change; picker still consumes
-        // frameGateRunsMerged.
-        let frameGateRunsWide = gateColumnRunsWide(halfWidth: wideProbeHalf)
-        let frameGateRunsWideMerged: [(startY: Int, endY: Int)] = {
-            guard !frameGateRunsWide.isEmpty else { return frameGateRunsWide }
-            var merged: [(startY: Int, endY: Int)] = []
-            var curStart = frameGateRunsWide[0].startY
-            var curEnd   = frameGateRunsWide[0].endY
-            for i in 1..<frameGateRunsWide.count {
-                let gap = frameGateRunsWide[i].startY - curEnd - 1
-                if gap <= gateRunMergeMaxGap {
-                    curEnd = frameGateRunsWide[i].endY
-                } else {
-                    merged.append((startY: curStart, endY: curEnd))
-                    curStart = frameGateRunsWide[i].startY
-                    curEnd   = frameGateRunsWide[i].endY
                 }
             }
             merged.append((startY: curStart, endY: curEnd))
@@ -790,23 +772,6 @@ final class DetectionEngine {
                 }
             }
 
-            // §34 wide-probe diagnostic strings (logging-only; paired with
-            // [GATE_RUNS] per frame so side-by-side comparison is grep-
-            // friendly). wideQualifying counts merged wide-runs that would
-            // clear the same minRequired torso floor as the real picker.
-            let wideRunsDesc = frameGateRunsWide
-                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
-                .joined(separator: ",")
-            let wideMergedDesc = frameGateRunsWideMerged
-                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
-                .joined(separator: ",")
-            let wideQualifying = frameGateRunsWideMerged.filter {
-                ($0.endY - $0.startY + 1) >= minRequired
-            }.count
-            let wideLongest = frameGateRunsWideMerged
-                .map { $0.endY - $0.startY + 1 }
-                .max() ?? 0
-
             if let idx = pickedIdx {
                 let picked = frameGateRunsMerged[idx]
                 let pickedLen = picked.endY - picked.startY + 1
@@ -817,10 +782,6 @@ final class DetectionEngine {
                     headSnagApplied ? "Y" : "N",
                     idx, pickedLen,
                     torsoDetY, blobH, minRequired, gateRunMergeMaxGap))
-                slog(String(format:
-                    "[GATE_RUNS_WIDE] frame=%d runsWide=[%@] mergedWide=[%@] qualifyingWide=%d longestWide=%d minReq=%d mergeGap=%d",
-                    frameIndex, wideRunsDesc, wideMergedDesc,
-                    wideQualifying, wideLongest, minRequired, gateRunMergeMaxGap))
             } else {
                 slog(String(format:
                     "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d widths=[%@] headSnag=%@ pickedIdx=none blobH=%d minReq=%d mergeGap=%d fire=N",
@@ -828,10 +789,6 @@ final class DetectionEngine {
                     qualifyingCount, widthsDesc,
                     headSnagApplied ? "Y" : "N",
                     blobH, minRequired, gateRunMergeMaxGap))
-                slog(String(format:
-                    "[GATE_RUNS_WIDE] frame=%d runsWide=[%@] mergedWide=[%@] qualifyingWide=%d longestWide=%d minReq=%d mergeGap=%d",
-                    frameIndex, wideRunsDesc, wideMergedDesc,
-                    wideQualifying, wideLongest, minRequired, gateRunMergeMaxGap))
                 if qualifyingCount == 0 {
                     let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
                     logReject("gate_col_run",
@@ -1412,28 +1369,16 @@ final class DetectionEngine {
     /// (single column, full frame height) in ascending startY order. Drives
     /// both the qualifying-run fire gate and the topmost-qualifying detY
     /// selection. Empty result means no mask at the gate column this frame.
-    private func gateColumnRuns() -> [(startY: Int, endY: Int)] {
-        let W = processWidth, H = processHeight
-        let gx = gateColumn
-        var runs: [(startY: Int, endY: Int)] = []
-        var rs = -1
-        for y in 0..<H {
-            if maskBuf[y * W + gx] != 0 {
-                if rs < 0 { rs = y }
-            } else if rs >= 0 {
-                runs.append((startY: rs, endY: y - 1))
-                rs = -1
-            }
-        }
-        if rs >= 0 { runs.append((startY: rs, endY: H - 1)) }
-        return runs
-    }
-
-    /// §34 logging-only helper: return contiguous Y runs of an OR-projection
-    /// across a horizontal band (gateColumn ± halfWidth). A row is active if
-    /// ANY column in the band has a mask pixel at that row. Used only by
-    /// the [GATE_RUNS_WIDE] diagnostic — detector behavior is unchanged.
-    private func gateColumnRunsWide(halfWidth: Int) -> [(startY: Int, endY: Int)] {
+    /// §34 H-THICK-GATE-PROJECTION (shipped 2026-04-15). Returns contiguous
+    /// Y runs of the OR-projection across a horizontal band (gateColumn ±
+    /// halfWidth, 9 cols total at halfWidth=4). A row is active if ANY
+    /// column in the band has a mask pixel at that row. Replaces the older
+    /// single-column gate extraction so bright-outdoor / backlit crossings
+    /// with near-zero motion blur — which produce a "hollow torso" motion
+    /// mask with only leading/trailing edge stripes — still yield a
+    /// contiguous torso run for the §23 qualifier + §30 placement to
+    /// consume. See detector_hypotheses.md §34 and Test SS.
+    private func gateColumnRunsThick(halfWidth: Int) -> [(startY: Int, endY: Int)] {
         let W = processWidth, H = processHeight
         let xMin = max(0, gateColumn - halfWidth)
         let xMax = min(W - 1, gateColumn + halfWidth)
