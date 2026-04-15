@@ -5796,3 +5796,104 @@ User's verdict: "detects the back of the body instead of the front." Interpretat
 
 §32 H-TRAILING-HAND-SWIPE-SUPPRESS: reject or defer fires where the gate-column vertical run is dominated by a narrow horizontal protrusion (trailing arm) rather than torso-width mass. L6 and L10 are deferred Y-tuning follow-ups (candidate §33).
 
+---
+
+## Run 2026-04-15 Test RR — 16 crossings, outdoor bright light (DATA-INVALID FOR DETECTOR TUNING)
+
+### ⚠️ Lighting caveat — read first
+
+**Camera was run outdoors pointed toward a window / bright
+background.** AVCaptureDevice auto-exposure cratered to
+**0.6–2.5 ms** exposure at **ISO 28–40** across every crossing
+(vs Test QQ's 8.33 ms / ISO 900+). At 0.6 ms exposure, motion
+blur is near-zero; a body moving at running speed produces a
+crisp silhouette, so frame-differencing only captures the thin
+leading/trailing edges of motion, not a solid body fill. Every
+GATE_RUNS line in this test shows `fill=0.14–0.41` with heavy
+fragmentation inside the blob (internal gaps of 5–88 px), so
+the picker is grabbing whatever 55+ px contiguous fragment
+glues together from limb/head edges rather than the torso.
+
+**Conclusion: this run's Δy numbers are not a test of §30 / §31
+/ §32 and must not be used to re-evaluate the detector.** It
+is a framing/lighting failure. Detector behavior must be
+re-validated with a camera pointed away from any window or
+direct bright source, in Test QQ–like indoor lighting with
+`[CAM]` exposure settling at 6–10 ms before crossings begin.
+
+### Session config
+
+`[ENGINE_CONFIG] picker=longestRun cam=front process=180x320 gate=col90±2 diffThresh=15 hFrac=0.55 wFrac=0.08 localSupport=0.25 fillStrict=0.20 aspStrict=1.2 fillLenient=0.12 aspLenient=1.7 torsoFrac=0.30 spikeRatio=1.5 warmup=10 cooldown=0.50s leadingEdge=ON torsoRunAbsMin=50 torsoRunAbsMax=55 torsoRunHeightFrac=0.25 gateRunMergeMaxGap=2 runPicker=torso_bias detY=0.30x_from_picked_top`
+
+(Identical to Test QQ — no code change between QQ and RR.
+Only the physical environment changed: outdoor, backlit by
+window.)
+
+### Per-crossing table (recorded for completeness, not for tuning)
+
+| # | Frame | detY | userY | Δy | userX | Scenario | Part landed on |
+|---|-------|------|-------|-----|-------|----------|----------------|
+| 1 | 42 | 89 | 169 | +80 | 107 | walk | back of head |
+| 2 | 103 | 261 | 169 | -92 | 99 | walk, leaning | left leg |
+| 3 | 183 | 74 | — | — | — | skipped per user | — |
+| 4 | 429 | 90 | 163 | +73 | 106 | walk | head |
+| 5 | 761 | 263 | 151 | -112 | 107 | running | front-of-body, lower leg |
+| 6 | 877 | 110 | 154 | +44 | 83 | running | arm, head-height |
+| 7 | 986 | 279 | 150 | -129 | 106 | running | left foot, front of body |
+| 8 | 1091 | 261 | 151 | -110 | 72 | running | leg |
+| 9 | 1212 | 233 | 154 | -79 | 115 | running | leg |
+| 10 | 1315 | 180 | 163 | -17 | 98 | running | torso, slightly late |
+| 11 | 1430 | 107 | 141 | +34 | 90 | running | head |
+| 12 | 1531 | 89 | 144 | +55 | 93 | running | head |
+| 13 | 1641 | 233 | 162 | -71 | 86 | forward lean ("dip") | knee |
+| 14 | 1734 | 131 | 167 | +36 | 75 | forward lean ("dip") | neck |
+| 15 | 1852 | 234 | 148 | -86 | 82 | regular run w/ big swing | leg, too late |
+| 16 | 1952 | 161 | 159 | -2 | 93 | regular run w/ big swing | torso, slightly late |
+
+Σ|Δy| = 1020 across 15 scorable laps = 68 px/lap.
+For context only: Test QQ (indoor) scored 10.6 px/lap under the
+same code. The 6.4× increase is consistent with the
+lighting/exposure cause, not a detector regression.
+
+### Exposure comparison
+
+| Test | Lighting | Exp (ms) | ISO | Blob fill typical |
+|------|----------|---------:|----:|:------------------|
+| QQ | indoor | 8.33 | 878–1095 | 0.22–0.41 with solid runs |
+| RR | outdoor, backlit | 0.60–2.56 | 28–40 | 0.14–0.41 with heavy internal gaps |
+
+The exposure difference is the full explanation for every
+anchor failure in RR. Running shapes end up fragmented into
+top-of-head + upper-arm + hip + leg chunks; whichever chunk
+cluster glues to ≥ 55 px contiguous at the gate column drives
+the detY. That explains why running laps (big limb swings)
+anchor on legs/feet (L5/L7/L8/L9/L15), head-only laps anchor
+on head (L4/L11/L12), and only a lap where the torso happened
+to produce the longest continuous differenced run (L16)
+anchored correctly.
+
+### §31 / §32 observation only
+
+`headSnag=N` on every fire except frames with multiple
+qualifiers (e.g. L11 f1430 had 2 qualifiers but the widest
+one was still the topmost, no reorder triggered). §31's
+reorder trigger `top_w × 2 < max_w` never fired. This is
+consistent with the underlying problem: when the body fill is
+fragmented, width-at-centerY is low everywhere, so width
+ratios don't separate head from torso.
+
+L11 f1430 EMPTY_STRIP: the one time the fallback path fired
+(L15 f1848 `empty_strip — detY=236` → reject), §29's rescue
+did work as designed.
+
+### Next step
+
+**Rerun Test RR indoors, same 10–15 crossing protocol** (mix
+of walk / running w/ big swings / forward lean). Check
+`[CAM]` exp is settling in the 6–10 ms range before
+starting. Parallel PF for L5/L11/L12/L13-style trailing-arm
+cases so we can gather §32 centroid-X vs PF-anchor data.
+
+Do NOT propose any detector change, logging change, or
+pipeline-primitive change based on Test RR data.
+
