@@ -165,6 +165,13 @@ final class DetectionEngine {
     var gateColumn: Int { processWidth / 2 }
     private let gateBandHalf: Int = 2
 
+    // §34 probe: OR-project a wider band (±7 cols = 15 total, x=83..97 when
+    // gateColumn=90) for logging-only diagnostic. Does NOT affect detector
+    // behavior; fed only into [GATE_RUNS_WIDE] so we can dry-run whether a
+    // thick-gate OR-projection would recover fragmented torso masks on
+    // bright-outdoor crossings before shipping the behavior change.
+    private let wideProbeHalf: Int = 7
+
     // Session state
     private(set) var isActive = false
     var isFrontCamera = false
@@ -253,6 +260,9 @@ final class DetectionEngine {
             useLeadingEdgeTrigger ? "ON" : "off",
             torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap
         ))
+        let wMin = max(0, gateColumn - wideProbeHalf)
+        let wMax = min(processWidth - 1, gateColumn + wideProbeHalf)
+        slog("[WIDE_PROBE_CONFIG] wideProbe=x\(wMin)..x\(wMax) halfWidth=\(wideProbeHalf) mode=log_only")
     }
 
     func stop() {
@@ -395,6 +405,33 @@ final class DetectionEngine {
                     merged.append((startY: curStart, endY: curEnd))
                     curStart = frameGateRuns[i].startY
                     curEnd   = frameGateRuns[i].endY
+                }
+            }
+            merged.append((startY: curStart, endY: curEnd))
+            return merged
+        }()
+
+        // §34 logging-only probe. OR-project a 15-col band (gateColumn ± 7,
+        // i.e. x=83..97 when gateColumn=90) down the Y axis: a row is
+        // active if ANY column in the band has a mask pixel. Merge with
+        // the same gap=2 rule as frameGateRunsMerged. Emitted alongside
+        // [GATE_RUNS] for side-by-side comparison with the shipped
+        // single-column gate. No behavior change; picker still consumes
+        // frameGateRunsMerged.
+        let frameGateRunsWide = gateColumnRunsWide(halfWidth: wideProbeHalf)
+        let frameGateRunsWideMerged: [(startY: Int, endY: Int)] = {
+            guard !frameGateRunsWide.isEmpty else { return frameGateRunsWide }
+            var merged: [(startY: Int, endY: Int)] = []
+            var curStart = frameGateRunsWide[0].startY
+            var curEnd   = frameGateRunsWide[0].endY
+            for i in 1..<frameGateRunsWide.count {
+                let gap = frameGateRunsWide[i].startY - curEnd - 1
+                if gap <= gateRunMergeMaxGap {
+                    curEnd = frameGateRunsWide[i].endY
+                } else {
+                    merged.append((startY: curStart, endY: curEnd))
+                    curStart = frameGateRunsWide[i].startY
+                    curEnd   = frameGateRunsWide[i].endY
                 }
             }
             merged.append((startY: curStart, endY: curEnd))
@@ -753,6 +790,23 @@ final class DetectionEngine {
                 }
             }
 
+            // §34 wide-probe diagnostic strings (logging-only; paired with
+            // [GATE_RUNS] per frame so side-by-side comparison is grep-
+            // friendly). wideQualifying counts merged wide-runs that would
+            // clear the same minRequired torso floor as the real picker.
+            let wideRunsDesc = frameGateRunsWide
+                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
+                .joined(separator: ",")
+            let wideMergedDesc = frameGateRunsWideMerged
+                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
+                .joined(separator: ",")
+            let wideQualifying = frameGateRunsWideMerged.filter {
+                ($0.endY - $0.startY + 1) >= minRequired
+            }.count
+            let wideLongest = frameGateRunsWideMerged
+                .map { $0.endY - $0.startY + 1 }
+                .max() ?? 0
+
             if let idx = pickedIdx {
                 let picked = frameGateRunsMerged[idx]
                 let pickedLen = picked.endY - picked.startY + 1
@@ -763,6 +817,10 @@ final class DetectionEngine {
                     headSnagApplied ? "Y" : "N",
                     idx, pickedLen,
                     torsoDetY, blobH, minRequired, gateRunMergeMaxGap))
+                slog(String(format:
+                    "[GATE_RUNS_WIDE] frame=%d runsWide=[%@] mergedWide=[%@] qualifyingWide=%d longestWide=%d minReq=%d mergeGap=%d",
+                    frameIndex, wideRunsDesc, wideMergedDesc,
+                    wideQualifying, wideLongest, minRequired, gateRunMergeMaxGap))
             } else {
                 slog(String(format:
                     "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d widths=[%@] headSnag=%@ pickedIdx=none blobH=%d minReq=%d mergeGap=%d fire=N",
@@ -770,6 +828,10 @@ final class DetectionEngine {
                     qualifyingCount, widthsDesc,
                     headSnagApplied ? "Y" : "N",
                     blobH, minRequired, gateRunMergeMaxGap))
+                slog(String(format:
+                    "[GATE_RUNS_WIDE] frame=%d runsWide=[%@] mergedWide=[%@] qualifyingWide=%d longestWide=%d minReq=%d mergeGap=%d",
+                    frameIndex, wideRunsDesc, wideMergedDesc,
+                    wideQualifying, wideLongest, minRequired, gateRunMergeMaxGap))
                 if qualifyingCount == 0 {
                     let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
                     logReject("gate_col_run",
@@ -1357,6 +1419,34 @@ final class DetectionEngine {
         var rs = -1
         for y in 0..<H {
             if maskBuf[y * W + gx] != 0 {
+                if rs < 0 { rs = y }
+            } else if rs >= 0 {
+                runs.append((startY: rs, endY: y - 1))
+                rs = -1
+            }
+        }
+        if rs >= 0 { runs.append((startY: rs, endY: H - 1)) }
+        return runs
+    }
+
+    /// §34 logging-only helper: return contiguous Y runs of an OR-projection
+    /// across a horizontal band (gateColumn ± halfWidth). A row is active if
+    /// ANY column in the band has a mask pixel at that row. Used only by
+    /// the [GATE_RUNS_WIDE] diagnostic — detector behavior is unchanged.
+    private func gateColumnRunsWide(halfWidth: Int) -> [(startY: Int, endY: Int)] {
+        let W = processWidth, H = processHeight
+        let xMin = max(0, gateColumn - halfWidth)
+        let xMax = min(W - 1, gateColumn + halfWidth)
+        var runs: [(startY: Int, endY: Int)] = []
+        var rs = -1
+        for y in 0..<H {
+            var active = false
+            var x = xMin
+            while x <= xMax {
+                if maskBuf[y * W + x] != 0 { active = true; break }
+                x += 1
+            }
+            if active {
                 if rs < 0 { rs = y }
             } else if rs >= 0 {
                 runs.append((startY: rs, endY: y - 1))
