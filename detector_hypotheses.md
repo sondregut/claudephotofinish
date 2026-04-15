@@ -3622,3 +3622,122 @@ compare against Test NN laps 2, 4, and the positive controls
 (laps 1, 3, 5, 6, 7, 8).
 
 ---
+
+## §29 H-PICKER-TOPMOST-WITH-FALLBACK (2026-04-15)
+
+Test OO revealed §28 (longest-qualifying picker) regresses 3 of 8
+sprint laps by anchoring detY on legs/feet or gap-fused spans of
+the whole body. §28 is invalidated; topmost qualifying remains the
+correct default for mid-body placement.
+
+§29 combines:
+
+1. **Revert §28:** pick the *topmost* qualifying merged run (as
+   before §28).
+2. **EMPTY_STRIP fallback (new):** if the picked run's
+   `torsoDetY` produces an empty horizontal strip downstream
+   (the existing `EMPTY_STRIP` reject), try the next qualifying
+   merged run below. Only kill the fire if *no* qualifier
+   produces a non-empty strip. This directly addresses the
+   original Test NN f401 case (topmost run was a gap-fused
+   head/shoulder fragment) without the Test OO regression.
+
+### Evidence from Test OO that §28 is wrong
+
+| Lap | Frame | merged runs (qualifying in bold) | §28 picked | Topmost would pick | Verdict |
+|----:|------:|----------------------------------|-----------:|-------------------:|---------|
+| 6 | f499 | **200..279:80** (only qualifier) | 200..279 (knee) | 200..279 | both wrong, but §28 not at fault here |
+| 7 | f577 | **134..262:129** (only qualifier, gap-fused whole body) | 134..262 (hip) | 134..262 | both wrong, the merge itself over-stretches |
+| 8 | f655 | **251..319:69** (only qualifier — legs) | 251..319 (feet) | 251..319 | both wrong, topmost run 103..141:39 is below 55 cap |
+
+Interesting finding: laps 6–8 are not actually caused by §28 vs
+§27. They're caused by **the torso-sized merged run falling below
+the 55 px cap** while a leg/foot run clears it. Laps with
+multiple qualifying runs that Test OO tested:
+
+| Lap | Frame | merged qualifiers | §28 picked | Topmost | Would topmost be better? |
+|----:|------:|-------------------|-----------:|--------:|:-------------------------:|
+| 2 | f179 | 98..208:111 (idx 2) | idx 2 = 98..208 | 98..208 | same, both GOOD |
+| 3 | f256 | 69..110:42 (idx 0, 42<54 no) / 117..220:104 (idx 1) | idx 1 | idx 1 | same, both GOOD |
+| 5 | f417 | 138..187:50 (idx 1) | idx 1 | idx 1 | same |
+
+So in Test OO, §28 and topmost would have picked identically on
+every single fired frame. The regressions on laps 1, 6, 7, 8 are
+**not** §28 vs topmost picker choice — they're the merge itself
+producing a non-torso-dominant run.
+
+### Revised root cause
+
+**H-MERGE-OVERREACH:** `gateRunMergeMaxGap = 4` is merging
+torso-to-leg runs and producing single merged runs that span the
+entire body or the legs alone. When the torso-only run is
+shorter than the leg merge or the whole-body merge, the picker
+(either topmost or longest) anchors wrong.
+
+Examples:
+- Lap 7 f577: raw runs `79..116:38, 134..181:48, 186..198:13,
+  202..211:10, 213..214:2, 216..222:7, 225..229:5, 232..233:2,
+  236..252:17, 255..262:8`. Gaps between these are ≤4 so they all
+  merge into 134..262:129. A 129 px "torso run" covering the
+  whole body is meaningless as an anchor.
+- Lap 8 f655: raw runs `251..308:58, 310..311:2, 313..319:7`
+  with gaps 1 and 1 merge to 251..319:69 — legs fused into a
+  single long run with no torso signal anywhere above.
+
+### Proposed change (revert §28 + address merge overreach)
+
+Two-part revision, not shipped:
+
+- **Revert §28 picker to topmost.** Restore `firstIndex` selection.
+- **Tighten `gateRunMergeMaxGap` from 4 to 2.** Motivation: Test
+  MM near-miss evidence showed `mergedMax2 = 67, 49, 56` on the
+  fragmentation cases that originally motivated §25 — gap=2 is
+  sufficient. Gap=4 merges too aggressively and creates limb-to-
+  torso fusions in Test OO.
+- **Add EMPTY_STRIP → next-qualifier fallback** as originally
+  planned, so the original Test NN f401 failure mode is still
+  fixed.
+
+### Behavioral-requirements check
+
+1. Torso crossings: better — topmost + tighter merge anchors on
+   the upper-chest contiguous run instead of a whole-body fusion.
+2. Hand swipes: unchanged; still fails the 50 px floor.
+3. Leg-only motion: better — topmost picker on tighter-merge
+   runs won't promote a leg-only qualifier when torso is absent.
+   (But lap 8 f655 would still late-fire, because *nothing* at
+   the gate column is a torso at fire frame. That's a detection-
+   timing issue, not a picker issue — noted as a separate follow-up.)
+4. Lighting: unchanged.
+5. Fast/slow: should improve fast sprints where gap=4 was fusing
+   stride runs.
+6. Forward lean: unchanged.
+7. Front/rear cam: unchanged.
+8. Double-fire: unchanged.
+9. Environmental: unchanged.
+
+### Status
+
+Shipped 2026-04-15 (build verified). Three-part change in
+`DetectionEngine.swift`:
+
+1. `gateRunMergeMaxGap: Int = 2` (was 4).
+2. §23 fire gate reverted to topmost qualifying merged run
+   (replaces §28 longest-qualifying loop).
+3. EMPTY_STRIP fallback added: the picker iterates qualifying
+   indices top-down, probes the horizontal strip at each
+   candidate's centerY, and picks the first one with
+   `stripWidth > 0`. If all qualifiers produce empty strips, the
+   fire is rejected with `reject=empty_strip
+   detail=qualifiers=N all_empty`. New log lines:
+   `[EMPTY_STRIP_PROBE]` per skipped qualifier and
+   `[EMPTY_STRIP_FALLBACK]` when `triedQualifiers > 0`.
+
+`[ENGINE_CONFIG]` now emits `runPicker=topmost_with_fallback`.
+
+Test PP next — same protocol as Test OO (10 crossings, parallel
+Photo Finish capture, tap on torso). Expected: laps 1, 6, 7, 8
+anchor on torso (or reject if no torso-sized run exists at gate
+on fire frame); laps 2–5, 9–10 unchanged.
+
+---

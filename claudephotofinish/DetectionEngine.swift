@@ -142,7 +142,10 @@ final class DetectionEngine {
     // the same laps, ruling out PF-parity. Merge preserves the 50 px
     // floor (arm-safety unchanged — arm-only frames show single short
     // runs with no neighbors to merge).
-    private let gateRunMergeMaxGap: Int = 4
+    // §29 (2026-04-15): tightened 4 → 2 after Test OO showed gap=4
+    // over-merging torso+leg fragments into whole-body spans, which
+    // mis-anchored picks onto non-torso regions (laps 6/7/8).
+    private let gateRunMergeMaxGap: Int = 2
 
     // §19 Full-frame flash guard: reject blobs that cover nearly the entire
     // frame with high fill. Photo Finish has no such pathology because its
@@ -238,7 +241,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=largest",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=topmost_with_fallback",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, gateBandHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -670,21 +673,12 @@ final class DetectionEngine {
             let minRequired = max(torsoRunAbsMin,
                                   min(torsoRunAbsMax,
                                       Int(Float(blobH) * torsoRunHeightFrac)))
-            // §25 Fire gate evaluates merged runs; logs emit both raw and
-            // merged views so the effect of merging is visible per frame.
-            // §28 H-PICKER-LARGEST: when multiple merged runs qualify,
-            // pick the longest rather than the topmost. Topmost can be a
-            // gap-fused head/shoulder fragment whose horizontal strip is
-            // empty, causing the downstream EMPTY_STRIP reject to kill a
-            // valid fire (Test NN lap 4 f401).
-            var qualifyingIdx: Int? = nil
-            var qualifyingLen = 0
-            for (i, run) in frameGateRunsMerged.enumerated() {
-                let len = run.endY - run.startY + 1
-                if len >= minRequired && len > qualifyingLen {
-                    qualifyingIdx = i
-                    qualifyingLen = len
-                }
+            // §29 H-PICKER-TOPMOST-WITH-FALLBACK: revert §28 — pick the
+            // topmost qualifying merged run. If its horizontal strip at
+            // centerY is empty (gap-fused head/shoulder fragment), advance
+            // to the next qualifier before rejecting the fire.
+            let qualifyingIndices = frameGateRunsMerged.indices.filter {
+                (frameGateRunsMerged[$0].endY - frameGateRunsMerged[$0].startY + 1) >= minRequired
             }
             let runsDesc = frameGateRuns
                 .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
@@ -692,13 +686,39 @@ final class DetectionEngine {
             let mergedDesc = frameGateRunsMerged
                 .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
                 .joined(separator: ",")
-            let qualifyingCount = frameGateRunsMerged.reduce(0) { acc, r in
-                acc + (((r.endY - r.startY + 1) >= minRequired) ? 1 : 0)
+            let qualifyingCount = qualifyingIndices.count
+
+            var pickedIdx: Int? = nil
+            for (tryN, idx) in qualifyingIndices.enumerated() {
+                let run = frameGateRunsMerged[idx]
+                let cy = (run.startY + run.endY) / 2
+                var lx = gateColumn
+                var rx = gateColumn
+                var xi = gateColumn - 1
+                while xi >= 0 && maskBuf[cy * W + xi] != 0 { lx = xi; xi -= 1 }
+                xi = gateColumn + 1
+                while xi < W && maskBuf[cy * W + xi] != 0 { rx = xi; xi += 1 }
+                let sw = (rx - gateColumn) + (gateColumn - lx)
+                if sw > 0 {
+                    pickedIdx = idx
+                    torsoDetY = cy
+                    if tryN > 0 {
+                        slog(String(format:
+                            "[EMPTY_STRIP_FALLBACK] frame=%d triedQualifiers=%d pickedIdx=%d detY=%d",
+                            frameIndex, tryN, idx, cy))
+                    }
+                    break
+                } else {
+                    slog(String(format:
+                        "[EMPTY_STRIP_PROBE] frame=%d idx=%d detY=%d stripWidth=0 try=%d advance=%@",
+                        frameIndex, idx, cy, tryN,
+                        (tryN + 1 < qualifyingIndices.count) ? "Y" : "N"))
+                }
             }
-            if let idx = qualifyingIdx {
+
+            if let idx = pickedIdx {
                 let picked = frameGateRunsMerged[idx]
                 let pickedLen = picked.endY - picked.startY + 1
-                torsoDetY = (picked.startY + picked.endY) / 2
                 slog(String(format:
                     "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d pickedIdx=%d pickedLen=%d detY=%d blobH=%d minReq=%d mergeGap=%d fire=Y",
                     frameIndex, runsDesc, mergedDesc,
@@ -706,12 +726,17 @@ final class DetectionEngine {
                     torsoDetY, blobH, minRequired, gateRunMergeMaxGap))
             } else {
                 slog(String(format:
-                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=0 blobH=%d minReq=%d mergeGap=%d fire=N",
+                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d pickedIdx=none blobH=%d minReq=%d mergeGap=%d fire=N",
                     frameIndex, runsDesc, mergedDesc,
-                    blobH, minRequired, gateRunMergeMaxGap))
-                let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
-                logReject("gate_col_run",
-                          detail: "tallest=\(tallest) need=\(minRequired)")
+                    qualifyingCount, blobH, minRequired, gateRunMergeMaxGap))
+                if qualifyingCount == 0 {
+                    let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
+                    logReject("gate_col_run",
+                              detail: "tallest=\(tallest) need=\(minRequired)")
+                } else {
+                    logReject("empty_strip",
+                              detail: "qualifiers=\(qualifyingCount) all_empty")
+                }
                 return nil
             }
         }

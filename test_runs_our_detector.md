@@ -5534,3 +5534,75 @@ Test OO (docs-only decision): evaluate whether to
 
 Neither change is shipped until a fresh sprint test with parallel
 PF reproduces the mechanism on independent data.
+
+## Run 2026-04-14 Test OO — §27 + §28 shipped, longest-picker regresses
+
+Session: `session_2026-04-14_215434.log`. Front camera, 180×320.
+`[ENGINE_CONFIG] … torsoRunAbsMin=50 torsoRunAbsMax=55
+torsoRunHeightFrac=0.25 gateRunMergeMaxGap=4 runPicker=largest`.
+
+10 crossings: 8 sprint-style + 2 walking (laps 9, 10).
+
+### Per-lap table
+
+| # | Fire f | detY | userY | Δy | userX | Picked merged | pickedIdx | Verdict |
+|--:|-------:|-----:|------:|----|------:|---------------|----------:|---------|
+| 1 | 103 | 150 | 141 | −9 | 126 | 93..208:116 | 0 | **BACK of body (way back)** |
+| 2 | 179 | 153 | 153 | +0 | 80 | 98..208:111 | 2 | GOOD |
+| 3 | 256 | 168 | 167 | −1 | 86 | 117..220:104 | 1 | GOOD |
+| 4 | 344 | 130 | 138 | +8 | 99 | 62..198:137 | 0 | GOOD |
+| 5 | 417 | 162 | 158 | −4 | 91 | 138..187:50 | 1 | GOOD |
+| 6 | 499 | 239 | 142 | **−97** | 103 | 200..279:80 | 1 | **KNEE / CALF (bad, fired low)** |
+| 7 | 577 | 198 | 155 | **−43** | 76 | 134..262:129 | 1 | **HAND/KNEE (bad, leg spans)** |
+| 8 | 655 | 285 | 139 | **−146** | 129 | 251..319:69 | 3 | **FOOT/KNEE (bad, picked last run)** |
+| 9 | 745 | 199 | 154 | −45 | 87 | 137..261:125 | 1 | GOOD but wants higher |
+| 10 | 838 | 147 | 154 | +7 | 78 | 90..205:116 | 0 | Few frames late (walk) |
+
+### Regression mechanism — §28 longest-picker anchors on limbs
+
+Laps 6, 7, 8 all picked a merged run that is *not* the torso.
+The longest merged run in the gate column is as often a leg/foot
+region as a torso, especially when the motion mask fragments
+differently between body parts:
+
+- **Lap 6 f499:** merged=`[114..151:38, 200..279:80, ...]`.
+  Topmost qualifier (114..151:38) would also need to pass — but it
+  doesn't (38 < minReq=54). Only the leg run (200..279:80)
+  qualified. detY = (200+279)/2 = 239 = knee/calf.
+- **Lap 7 f577:** merged=`[79..116:38, 134..262:129, ...]`. The
+  134..262 run spans shoulder through legs (a gap-merged fusion
+  stretching ~128 px across the whole body). Longest picker
+  centres on 198 → lower torso / hip / thigh.
+- **Lap 8 f655:** merged=`[103..141:39, 214..234:21, 243..245:3,
+  251..319:69]`. Topmost 103..141 is a 39 px head/shoulder, below
+  cap=55. Longest qualifier is 251..319:69 (the feet). detY = 285.
+- **Lap 1 f103:** merged=`[93..208:116, ...]`. Only one qualifier,
+  picked idx 0 — but it spans 116 px (head through belly) so the
+  centre (150) lands on the abdomen rather than mid-chest.
+- **Laps 2, 3, 4, 5 and 9, 10 all GOOD** — longest and topmost
+  would agree in these cases (either only one qualifier, or the
+  longest qualifier *is* the topmost torso).
+
+### §27 H-FLOOR-CAP validated
+
+`minReq` capped to 55 px on every tall-blob frame
+(laps 1–10 blobH = 179..281 → minReq = 50..55). Lap 2 f235-style
+rejections from Test NN do not reappear in Test OO: f99 shows
+`minReq=55 mergeGap=4 tallest=46` → correct reject (not a
+false-reject — the body wasn't actually at the gate yet).
+
+### §28 longest-picker invalidated
+
+The assumption that "largest merged run = torso" fails when the
+gate column produces a long merged run dominated by legs / feet /
+leg-to-torso gap-fusion. The topmost merged qualifier is a better
+anchor for mid-body detection even when it picks the
+head/shoulder on single-run frames.
+
+### Next step — §29 (see detector_hypotheses.md)
+
+Revert §28 to topmost-qualifying, and add an `EMPTY_STRIP`
+fallback: if the picked merged run's horizontal strip is empty at
+detY, advance to the next qualifying merged run below and retry.
+This addresses Test NN f401 (the original reason §28 was
+proposed) without the Test OO regression.
