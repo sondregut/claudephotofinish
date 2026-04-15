@@ -94,8 +94,17 @@ final class DetectionEngine {
     // The 0.15 value (commit 8003aca "Lower detection thresholds for earlier
     // firing") was opening the leak path for most elbow swipes.
     private let localSupportFraction: Float = 0.25
-    private let minFillRatio: Float = 0.20       // reject sparse blobs (hand swipes)
-    private let maxAspectRatio: Float = 1.2      // reject wide-flat blobs (legs/hand swipes)
+    private let minFillRatio: Float = 0.20       // strict tier — reject sparse blobs (hand swipes)
+    private let maxAspectRatio: Float = 1.2      // strict tier — reject wide-flat blobs (legs/hand swipes)
+
+    // §24 H-PREFILTER-SPRINT-LENIENT (2026-04-14, behind useLeadingEdgeTrigger).
+    // When a blob has a qualifying gate-col vertical run (≥ max(50, 0.25 × blobH))
+    // it is structurally a body, not an arm swipe, so relax fill/aspect to
+    // admit sprint-lunge geometry (wide toe-to-trail-hand bbox, low fill).
+    // When no qualifying run, fall back to strict tier above — preserves
+    // CLAUDE.md Behavior #2 arm-swipe rejection. See detector_hypotheses.md §24.
+    private let minFillRatioLenient: Float = 0.12
+    private let maxAspectRatioLenient: Float = 1.7
     private let spikeRatioThreshold: Float = 1.5 // §15: arm-spike rejection — if hRun at detY > median × this, re-pick
     private let warmupFrames: Int = 10           // skip early frames while auto-exposure settles
 
@@ -104,6 +113,29 @@ final class DetectionEngine {
     // human torso center ≈ 30% of total height from top of head.
     // Validated on 6 crossings across 2 sessions (mean |Δy| ≈ 5px).
     private let torsoFraction: Float = 0.30
+
+    // §23 H-GATE-COL-QUALIFYING-RUN feature flag.
+    // When true: Stage-1 fire requires at least one contiguous vertical mask
+    // run at the gate column with length ≥ max(torsoRunAbsMin, torsoRunHeightFrac ×
+    // blobH). detY is the center of the topmost such run. Stateless — no
+    // frame history, no growth check, no snap.
+    // When false: current (pre-§23) behavior, but [EMPTY_STRIP] log line
+    // still emitted so we can measure its frequency in production mode.
+    // Default ON (revert to false if it regresses).
+    // See detector_hypotheses.md §23 and plans/calm-sprouting-meerkat.md.
+    private let useLeadingEdgeTrigger: Bool = true
+    private let torsoRunAbsMin: Int = 50          // absolute floor for qualifying run length (px)
+    private let torsoRunHeightFrac: Float = 0.25  // fraction-of-blobH floor
+
+    // §25 H-GATE-RUN-MERGE-SMALL-GAPS (2026-04-15). Merge adjacent
+    // gate-column vertical runs whose pixel gap ≤ this value before
+    // applying the §23 qualifying-run floor. Test MM showed fragmentation
+    // on torso frames (mergedMax4 up to 67 px while raw longest was 30)
+    // that caused late-fires on laps 5/6; Photo Finish fired on-torso on
+    // the same laps, ruling out PF-parity. Merge preserves the 50 px
+    // floor (arm-safety unchanged — arm-only frames show single short
+    // runs with no neighbors to merge).
+    private let gateRunMergeMaxGap: Int = 4
 
     // §19 Full-frame flash guard: reject blobs that cover nearly the entire
     // frame with high fill. Photo Finish has no such pathology because its
@@ -199,13 +231,17 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f minFill=%.2f maxAspect=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, gateBandHalf,
             Int(diffThreshold), heightFraction, widthFraction,
-            localSupportFraction, minFillRatio, maxAspectRatio,
+            localSupportFraction,
+            minFillRatio, maxAspectRatio,
+            minFillRatioLenient, maxAspectRatioLenient,
             torsoFraction,
-            spikeRatioThreshold, warmupFrames, cooldown
+            spikeRatioThreshold, warmupFrames, cooldown,
+            useLeadingEdgeTrigger ? "ON" : "off",
+            torsoRunAbsMin, torsoRunHeightFrac, gateRunMergeMaxGap
         ))
     }
 
@@ -325,6 +361,83 @@ final class DetectionEngine {
             }
         }
 
+        // §23 Gate-column vertical runs (all contiguous mask runs at the
+        // single gate column, full frame height, ascending startY). Drives
+        // the qualifying-run fire gate and topmost-qualifying detY selection
+        // in the flag-on branch below.
+        let frameGateRuns = gateColumnRuns()
+
+        // §25 Merged-runs view (merge adjacent runs with gap ≤
+        // gateRunMergeMaxGap). Used by the §24 prefilter tier check and
+        // the §23 fire gate. Raw `frameGateRuns` is retained for logs.
+        let frameGateRunsMerged: [(startY: Int, endY: Int)] = {
+            guard useLeadingEdgeTrigger, !frameGateRuns.isEmpty else {
+                return frameGateRuns
+            }
+            var merged: [(startY: Int, endY: Int)] = []
+            var curStart = frameGateRuns[0].startY
+            var curEnd   = frameGateRuns[0].endY
+            for i in 1..<frameGateRuns.count {
+                let gap = frameGateRuns[i].startY - curEnd - 1
+                if gap <= gateRunMergeMaxGap {
+                    curEnd = frameGateRuns[i].endY
+                } else {
+                    merged.append((startY: curStart, endY: curEnd))
+                    curStart = frameGateRuns[i].startY
+                    curEnd   = frameGateRuns[i].endY
+                }
+            }
+            merged.append((startY: curStart, endY: curEnd))
+            return merged
+        }()
+
+        // §25 Diagnostic: dump full gate-col run list + gaps + gap-merged
+        // longest on any frame where the longest raw run is near the
+        // qualifying floor but didn't reach it. Used to distinguish
+        // H-FRAGMENTATION (multi-run with small gaps) from
+        // H-DIAGONAL-TORSO (single short run) in Test MM. Zero behavior
+        // change — pure log.
+        if useLeadingEdgeTrigger && !frameGateRuns.isEmpty {
+            let longest = frameGateRuns
+                .map { $0.endY - $0.startY + 1 }
+                .max() ?? 0
+            if longest >= 25 && longest < torsoRunAbsMin {
+                var gaps: [Int] = []
+                for i in 1..<frameGateRuns.count {
+                    gaps.append(frameGateRuns[i].startY - frameGateRuns[i - 1].endY - 1)
+                }
+                let runsDesc = frameGateRuns
+                    .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
+                    .joined(separator: ",")
+                let gapsDesc = gaps.map { String($0) }.joined(separator: ",")
+                // Longest length achievable by merging consecutive runs
+                // with gap ≤ N, for N ∈ {2, 4}. Tells us at log-read time
+                // whether a gap-merge rule would clear the 50 px floor.
+                func mergedLongest(_ maxGap: Int) -> Int {
+                    if frameGateRuns.isEmpty { return 0 }
+                    var best = 0
+                    var curStart = frameGateRuns[0].startY
+                    var curEnd   = frameGateRuns[0].endY
+                    for i in 1..<frameGateRuns.count {
+                        let gap = frameGateRuns[i].startY - curEnd - 1
+                        if gap <= maxGap {
+                            curEnd = frameGateRuns[i].endY
+                        } else {
+                            best = max(best, curEnd - curStart + 1)
+                            curStart = frameGateRuns[i].startY
+                            curEnd   = frameGateRuns[i].endY
+                        }
+                    }
+                    best = max(best, curEnd - curStart + 1)
+                    return best
+                }
+                slog(String(format:
+                    "[GATE_RUNS_FULL] frame=%d runs=[%@] gaps=[%@] longest=%d mergedMax2=%d mergedMax4=%d floor=%d",
+                    frameIndex, runsDesc, gapsDesc,
+                    longest, mergedLongest(2), mergedLongest(4), torsoRunAbsMin))
+            }
+        }
+
         // 2. Connected components
         let components = findComponents()
 
@@ -381,13 +494,46 @@ final class DetectionEngine {
                 logReject("width", detail: "\(comp.width)/\(minW)")
                 continue
             }
+
+            // §24 Two-tier prefilter. Compute whether this blob has a
+            // qualifying gate-col vertical run (same rule as §23 fire gate).
+            // If yes, apply lenient fill/aspect (sprint-lunge-safe); if no,
+            // apply strict (arm-swipe-safe). Only active under the shipped
+            // leading-edge flag — false branch keeps strict unconditionally.
+            let qualifyingMin = max(torsoRunAbsMin,
+                                    Int(Float(comp.height) * torsoRunHeightFrac))
+            var hasQualifyingRun = false
+            var longestQRLen = 0
+            // §25 Use merged runs (adjacent runs with gap ≤ gateRunMergeMaxGap
+            // combined) so a fragmented torso column is recognised.
+            for run in frameGateRunsMerged {
+                if run.endY < comp.minY || run.startY > comp.maxY { continue }
+                let len = run.endY - run.startY + 1
+                if len > longestQRLen { longestQRLen = len }
+                if len >= qualifyingMin { hasQualifyingRun = true }
+            }
+            let useLenient = useLeadingEdgeTrigger && hasQualifyingRun
+            let fillFloor  = useLenient ? minFillRatioLenient  : minFillRatio
+            let aspectCeil = useLenient ? maxAspectRatioLenient : maxAspectRatio
+
             let fillRatio = Float(comp.area) / Float(comp.width * comp.height)
-            if fillRatio < minFillRatio {
-                logReject("fill_ratio", detail: String(format: "%.2f/%.2f area=%d", fillRatio, minFillRatio, comp.area))
+            let aspect    = Float(comp.width) / Float(comp.height)
+            if fillRatio < fillFloor {
+                logReject("fill_ratio",
+                          detail: String(format: "fill=%.2f/%.2f aspect=%.2f blobH=%d blobW=%d hasQR=%@ qrLen=%d qrMin=%d",
+                                         fillRatio, fillFloor, aspect,
+                                         comp.height, comp.width,
+                                         hasQualifyingRun ? "Y" : "N",
+                                         longestQRLen, qualifyingMin))
                 continue
             }
-            if comp.width > Int(maxAspectRatio * Float(comp.height)) {
-                logReject("aspect_ratio", detail: String(format: "w=%d h=%d ratio=%.1f", comp.width, comp.height, Float(comp.width) / Float(comp.height)))
+            if comp.width > Int(aspectCeil * Float(comp.height)) {
+                logReject("aspect_ratio",
+                          detail: String(format: "aspect=%.2f/%.1f fill=%.2f blobH=%d blobW=%d hasQR=%@ qrLen=%d qrMin=%d",
+                                         aspect, aspectCeil, fillRatio,
+                                         comp.height, comp.width,
+                                         hasQualifyingRun ? "Y" : "N",
+                                         longestQRLen, qualifyingMin))
                 continue
             }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
@@ -497,11 +643,53 @@ final class DetectionEngine {
             return nil
         }
 
-        // §21 Blob-fraction detY. 30% from blob top, set during candidate
-        // selection. rawDetY (analyzeGate's picker output) stays on the
-        // DETECT log as a debug comparison but never influences the fire.
-        let torsoDetY = candidate.torsoY
+        // §23 H-GATE-COL-QUALIFYING-RUN fire gate. Each frame, enumerate
+        // contiguous vertical mask runs at the gate column. Fire iff any run
+        // meets a torso-sized length floor (max(50, 0.25 × blobH)). detY is
+        // the center of the topmost qualifying run. Stateless — no prev-frame
+        // comparison, no growth check, no snap. The rule handles arm-only
+        // (no qualifying run), limb-lead (limb run too short), and late-fire
+        // (fires first frame run reaches floor) failure modes uniformly.
+        var torsoDetY = candidate.torsoY       // §21 default (used when flag is off)
         let rawDetY = candidate.rawDetY
+
+        if useLeadingEdgeTrigger {
+            let blobH = candidate.comp.height
+            let minRequired = max(torsoRunAbsMin, Int(Float(blobH) * torsoRunHeightFrac))
+            // §25 Fire gate evaluates merged runs; logs emit both raw and
+            // merged views so the effect of merging is visible per frame.
+            let qualifyingIdx = frameGateRunsMerged.firstIndex {
+                ($0.endY - $0.startY + 1) >= minRequired
+            }
+            let runsDesc = frameGateRuns
+                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
+                .joined(separator: ",")
+            let mergedDesc = frameGateRunsMerged
+                .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
+                .joined(separator: ",")
+            let qualifyingCount = frameGateRunsMerged.reduce(0) { acc, r in
+                acc + (((r.endY - r.startY + 1) >= minRequired) ? 1 : 0)
+            }
+            if let idx = qualifyingIdx {
+                let picked = frameGateRunsMerged[idx]
+                let pickedLen = picked.endY - picked.startY + 1
+                torsoDetY = (picked.startY + picked.endY) / 2
+                slog(String(format:
+                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=%d pickedIdx=%d pickedLen=%d detY=%d blobH=%d minReq=%d mergeGap=%d fire=Y",
+                    frameIndex, runsDesc, mergedDesc,
+                    qualifyingCount, idx, pickedLen,
+                    torsoDetY, blobH, minRequired, gateRunMergeMaxGap))
+            } else {
+                slog(String(format:
+                    "[GATE_RUNS] frame=%d runs=[%@] merged=[%@] qualifying=0 blobH=%d minReq=%d mergeGap=%d fire=N",
+                    frameIndex, runsDesc, mergedDesc,
+                    blobH, minRequired, gateRunMergeMaxGap))
+                let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
+                logReject("gate_col_run",
+                          detail: "tallest=\(tallest) need=\(minRequired)")
+                return nil
+            }
+        }
 
         // Keep adjustForArmSpike as a diagnostic — it builds the HRUN_PROFILE
         // string we still want in logs.
@@ -573,6 +761,20 @@ final class DetectionEngine {
             dAfter  = Float(gateColumn - runLeftX)
         }
         let stripWidth = dBefore + dAfter
+
+        // §23 Part 2b: empty-strip handling. A zero-width strip means the
+        // detection row has no mask pixels at the gate — we'd be
+        // interpolating off of nothing. Under the flag, reject; otherwise
+        // log-only to measure frequency in current-behavior mode.
+        if stripWidth == 0 {
+            if useLeadingEdgeTrigger {
+                slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 action=reject")
+                logReject("empty_strip", detail: "detY=\(torsoDetY)")
+                return nil
+            } else {
+                slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 wouldRejectUnderFlag=true action=log_only")
+            }
+        }
 
         var crossingTime: TimeInterval
         let fraction = stripWidth > 0 ? Double(dBefore / stripWidth) : 0.5
@@ -1052,6 +1254,27 @@ final class DetectionEngine {
     private let minGateHeightFraction: Float = 0.08 // frame-absolute floor for gate support
 
     private let sliceWidth = 3 // multi-column window for local support scoring
+
+    /// §23 Enumerate every contiguous vertical mask run at the gate column
+    /// (single column, full frame height) in ascending startY order. Drives
+    /// both the qualifying-run fire gate and the topmost-qualifying detY
+    /// selection. Empty result means no mask at the gate column this frame.
+    private func gateColumnRuns() -> [(startY: Int, endY: Int)] {
+        let W = processWidth, H = processHeight
+        let gx = gateColumn
+        var runs: [(startY: Int, endY: Int)] = []
+        var rs = -1
+        for y in 0..<H {
+            if maskBuf[y * W + gx] != 0 {
+                if rs < 0 { rs = y }
+            } else if rs >= 0 {
+                runs.append((startY: rs, endY: y - 1))
+                rs = -1
+            }
+        }
+        if rs >= 0 { runs.append((startY: rs, endY: H - 1)) }
+        return runs
+    }
 
     private func analyzeGate(comp: Component, gMin: Int, gMax: Int) -> GateAnalysis? {
         let W = processWidth, H = processHeight

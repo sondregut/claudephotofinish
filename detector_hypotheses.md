@@ -3169,3 +3169,288 @@ Key unknowns Test II must answer:
   detY itself is not gate-anchored.
 
 ---
+
+## §23 H-GATE-COL-QUALIFYING-RUN — stateless spatial fire rule (2026-04-14)
+
+**Hypothesis (active):** Photo Finish fires on the first frame where
+any contiguous vertical mask run at the gate column is ≥ a torso-sized
+length, evaluated independently per frame. No temporal state. detY is
+the center of the topmost such run. Everything the detector needs is
+present in one frame.
+
+Operationalized:
+
+```
+runs       = contiguous vertical mask runs at the gate column
+qualifying = { r in runs | r.length ≥ max(50, 0.25 × blobH) }
+fire ↔ qualifying.nonEmpty
+detY = center of qualifying.sortedByStartY.first
+```
+
+### Why this supersedes prior hypotheses
+
+Prior hypotheses in this file proposed:
+- §22: torso-column-distance gate (`|TORSO_COLUMN.distSigned| ≤ 10`).
+  INVALIDATED by Test HH (TORSO_COLUMN frequently unpopulated).
+- H-TORSO-LEADING-EDGE (temporal growth of gate-col run, 2× ratio +
+  decisive hatch). SUPERSEDED by Test JJ evidence:
+  - Decisive threshold max(60, 0.50 × blobH) ≈ 117 never fires in
+    practice (real torso runs cluster 61–88).
+  - Growth-ratio check caused the Test JJ late-fire laps 6/10
+    (continuous-mask walks climb gradually, never cleanly double).
+  - Growth-ratio check caused the Test JJ near-2× rejections
+    (ratios 1.84–1.90 on legit torso arrivals).
+- §21 `torsoFraction = 0.30` blob-anchored detY + snap-or-reject.
+  SUPERSEDED: §2.9 "longest run anywhere" bug is resolved structurally
+  by picking topmost qualifying run at the gate column — candidate
+  +snap no longer needed.
+
+Each of those was directionally right but over-complicated. The
+qualifying-run rule collapses them into one stateless evaluation.
+
+### Evidence triangulation
+
+- **Test JJ log clusters:** torso-at-gate 61–88 px; arm-at-gate 5–20;
+  leg-at-gate 20–45. Clean gap at ~50.
+- **Arm-only test (user):** waving arm with no body in frame never
+  fires → PF reads the column slice, not the whole blob.
+- **`detection_spec.md` ~240:** "frontmost qualifying torso surface"
+  and "first locally substantial connected slice with enough
+  continuous vertical support."
+- **§2.9 of this file (line 208):** "no preference for runs near the
+  leading edge in Y; per-column longest picks shin-band." Picking
+  topmost qualifying run fixes this directly.
+- **`raw_test_results.md` 12f (book sharp corner):** detection
+  deferred until thicker slice reached the gate. Matches a per-frame
+  spatial rule, not a temporal wait.
+
+### Handles each Test JJ failure
+
+| Failure | Under H-GATE-COL-QUALIFYING-RUN |
+|---|---|
+| Lap 4 chin (5-px arm + 85-px torso) | 5-px fails qualification; topmost qualifying = torso → detY on torso |
+| Laps 6/10 late fire | No growth gate → fires on first frame run ≥ 50 |
+| Near-2× rejections (59, 83 px) | Both ≥ 50 → fire |
+| Arm-only swipe | No run ≥ 50 → no fire (matches PF) |
+| Limb ahead of body | Limb slice < 50 at gate col → defer; torso arrives → fire |
+
+### Risks & open questions
+
+1. **50 px floor is Test-JJ calibrated.** If a smaller athlete or
+   strong lean produces torso runs in 40–48 px, fires get lost.
+   Mitigation: `0.25 × blobH` scales with blob size; `max(50, ...)`
+   only binds for small blobs (blobH < 200). Monitor `[GATE_RUNS]`
+   on Test KK for qualifying runs in the 45–55 window.
+2. **Topmost-qualifying could pick head/neck** if head produces a
+   50+ run. PF spec explicitly ignores head. If Test KK shows this,
+   add a `startY ≥ blob.minY + 0.10 × blobH` guard. Not
+   preemptively — wait for evidence.
+3. **Two qualifying runs** (torso + thigh during stride): topmost
+   picks torso → correct.
+4. **Stateless → no hysteresis.** Existing 0.5 s cooldown handles
+   double-fire risk.
+
+### Test KK plan
+
+Same structure as Test JJ (6 walk-small + 4 big-step + 6 jog+arms
++ 4 jog-pinned = 20 crossings) + 2 arm-only sanity laps.
+
+Pass criteria:
+- All 11 Test-JJ GOODs still fire GOOD.
+- Lap-4-equivalent: dot on torso (Δy ≤ 15).
+- Lap-6/10-equivalents: fire earlier, user verdict GOOD.
+- Arm-only laps: no fire.
+
+Regression or head-placement → reassess before flipping flag to
+always-on.
+
+---
+
+## §24 — 2026-04-14 H-PREFILTER-SPRINT-LENIENT (unvalidated, awaiting Test LL)
+
+### Source
+
+External reviewer (Gemini, 2026-04-14). Reviewer had the pipeline
+sketch only — no access to Tests DD–KK logs, user verdicts, or the
+CLAUDE.md operating-mode constraints. Claim must be evaluated
+against our evidence before any calibration change.
+
+### Hypothesis
+
+Claim: explosive sprint finishes (full stride + trail arm + forward
+lean) are being erased by the Stage-1 geometric prefilter:
+
+- `minFillRatio = 0.20` — bounding box widens toe-to-trail-hand, fill
+  drops to 0.12–0.15, rejected as "sparse swipe."
+- `maxAspectRatio = 1.2` — diving finish widens horizontal footprint
+  beyond 1.2 × height, rejected as "wide-flat."
+
+Reviewer's proposed fix: unconditionally relax to `0.12 / 1.7`.
+
+### Evaluation against our evidence
+
+1. **Never observed as a fire-losing failure in Tests DD–KK.** No
+   `[REJECT]` entry in recent logs attributes a user-verdicted legit
+   crossing to `FILL` or `ASPECT`. Test KK session 2 had 7/7 jogs
+   fire, all passed prefilter. Failure is hypothesized, not logged.
+2. **`0.20` fill floor is load-bearing for CLAUDE.md Behavior #2**
+   (must reject hand swipes). Arm-swipe bounding boxes cluster at
+   `fill ≈ 0.10–0.18` in earlier tests. Blanket lowering to `0.12`
+   places arm-swipe and sprint-lunge fill bands on the same side of
+   the threshold — loses the discriminator.
+3. **`1.2` aspect ceiling is unlikely to bind in portrait.** At
+   180×320 processing resolution, a full-body blob height of 234–261
+   px against typical torso width ~120 px gives aspect ≈ 0.5. A
+   sprint lunge would need to widen past ~280 px to breach 1.2 ×
+   234 = 281 px — plausible only at severe forward dive.
+4. **Reveal-gap in current logs.** `[REJECT]` lines do not carry
+   numeric `fill` / `aspect` / blob-geometry. We cannot rule out
+   silent reject-on-sprint failures without enriched logging.
+
+### Decision
+
+Reject unconditional relaxation. Ship a conditional two-tier
+prefilter gated on a signal arms structurally cannot fake: the
+qualifying gate-col vertical run from §23
+(`len ≥ max(50, 0.25 × blobH)`).
+
+- **Strict tier** (arm-swipe-safe): `fill ≥ 0.20`, `aspect ≤ 1.2`.
+  Applied when no qualifying run present.
+- **Lenient tier** (sprint-lunge-safe): `fill ≥ 0.12`, `aspect ≤ 1.7`.
+  Applied only when a qualifying run is present on this frame.
+
+Arm-only motion produces 5–20 px gate-col runs (six tests'
+evidence). The qualifying-run floor at 50 px is a hard structural
+barrier, not a numeric threshold in the same band as fill/aspect.
+Gating on that axis preserves arm-swipe rejection while admitting
+sprint lunges in the regime where a body column is already present.
+
+Behind `useLeadingEdgeTrigger` flag. False branch unchanged.
+
+### Prerequisite — enrich `[REJECT]`
+
+Extend the reject log to:
+
+```
+[REJECT] frame=N reason=FILL|ASPECT|HEIGHT|WIDTH
+         fill=X.XX aspect=X.XX blobH=H blobW=W
+         hasQR=Y/N qrLen=N
+```
+
+Without this, Test LL cannot quantify how often sprint-lunge rejects
+actually happen, nor confirm `hasQR=false` on arm-only frames.
+
+### Test LL plan
+
+4 explosive-sprint crossings + 4 normal jog baseline + 4 arm-only
+sanity + 2 leg-swipe sanity.
+
+Pass criteria:
+
+- All 4 explosive sprints fire. Zero `[REJECT] reason=FILL|ASPECT`
+  on those crossings.
+- All 4 normal jogs fire as in Test KK (no regression).
+- All 4 arm-only swipes rejected. `hasQR=false` on every arm-only
+  frame in the logs.
+- Both leg-swipe laps: no fire until torso arrives.
+
+Fail actions:
+
+- Arm-only frame logs `hasQR=true` → structural assumption wrong;
+  revert to single-tier strict.
+- Sprint rejects at strict tier despite `hasQR=false` → gate-col
+  measurement failing on lunge frames (different problem, different
+  fix).
+
+### Relation to §23
+
+§23 introduced the qualifying-run rule as the fire gate. §24 reuses
+the same signal as a prefilter discriminator. Both gated under the
+same flag; they compose — the prefilter admits the blob, the fire
+gate decides whether to trigger.
+
+### Status
+
+Unvalidated. Code + log changes shipped (pending build). Waiting on
+Test LL logs to confirm or revert.
+
+---
+
+## §25 — H-GATE-RUN-MERGE-SMALL-GAPS (2026-04-15)
+
+### Problem restated
+
+Test LL (2026-04-14) produced 8 crossings: laps 1, 2, 3, 5 fired
+cleanly; laps 4, 6, 7 (sprint motion with big arm + leg swings)
+fired "way too late" on the trailing leg, with `userX` at 135–141
+when the gate column is `X=90`. §24 two-tier prefilter did not
+regress arm-only rejection, so the problem was downstream — the §23
+qualifying-run fire-gate floor (`len ≥ max(50, 0.25 × blobH)`) was
+not being met on sprint torso frames.
+
+### Competing hypotheses evaluated via `[GATE_RUNS_FULL]` (Test MM)
+
+Added `[GATE_RUNS_FULL]` diagnostic logging raw runs + gaps +
+`mergedMax2` / `mergedMax4` (length achievable by merging adjacent
+runs with gap ≤ 2 / 4 px). Test MM ran 6 crossings (6 laps + 1
+rejected) with parallel Photo Finish capture.
+
+**Photo Finish fired on-torso on every lap.** PF-parity ruled out —
+the late fires are our bug, not PF behavior we should match.
+
+Near-miss data on preceding frames before the late fires:
+
+| Frame | longest | mergedMax4 | Mechanism |
+|------:|--------:|-----------:|-----------|
+| f261 (→ lap 3) | 42 | 42 | single run — H-DIAGONAL-TORSO |
+| f262 (→ lap 3) | 32 | 44 | small merge, still < 50 |
+| f602 (→ rejected) | 36 | 44 | small merge, still < 50 |
+| f692 (→ lap 6) | 30 | **67** | fragmentation — merge would fire |
+| f694 (→ lap 5) | 29 | 49 | fragmentation, 1 px shy |
+| f768 (→ lap 6) | 27 | **56** | fragmentation — merge would fire |
+
+Both mechanisms are real:
+
+- **H-FRAGMENTATION** confirmed (f692, f694, f768) — mask at gate
+  column breaks into multiple short runs separated by 1–4 px gaps.
+  `mergedMax4` clears 50 px on multiple preceding frames.
+- **H-DIAGONAL-TORSO** confirmed (f261) — a single run of ~42 px
+  with no neighbors to merge. Gap-merge cannot rescue this frame.
+
+### Decision
+
+Ship gap-merge (`maxGap = 4`) first — safer (arm-safety floor
+untouched) and directly fixes laps 5, 6. Lap 3 (single-run diagonal)
+may still late-fire; revisit with a conservative floor drop only if
+follow-up test shows it still misses.
+
+### Code changes
+
+`claudephotofinish/DetectionEngine.swift`:
+
+- Added `gateRunMergeMaxGap: Int = 4` constant.
+- Compute `frameGateRunsMerged` once per frame next to `frameGateRuns`
+  (only when `useLeadingEdgeTrigger`; otherwise identical).
+- §24 two-tier prefilter qualifying-run check uses merged runs.
+- §23 fire gate picks merged runs; `detY` is the centre of the
+  topmost qualifying merged run.
+- `[GATE_RUNS]` emits both raw `runs=[...]` and `merged=[...]` so
+  the merge effect is visible per frame.
+- `[ENGINE_CONFIG]` emits `gateRunMergeMaxGap=4`.
+- Raw `[GATE_RUNS_FULL]` near-miss log retained (it keys off raw
+  `longest < torsoRunAbsMin`, independent of merge) for continued
+  post-ship diagnostics.
+
+Why arm-safety holds: an arm-only swipe produces a single short run
+at the gate column (Test LL/MM dumps show `qrLen ≤ 20` on arm-only
+frames with no adjacent runs to merge). Merging doesn't create
+phantom arm length.
+
+### Status
+
+Shipped 2026-04-15, build verified. Re-test expected: sprint laps 5
+and 6 fire on torso (not trailing leg); lap 3 may still miss on
+single-run diagonal. Arm-only swipes still reject (`mergedMax4`
+equals `longest` when no neighbors — floor unchanged).
+
+---

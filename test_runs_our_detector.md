@@ -5224,3 +5224,181 @@ tests the most promising signal, generates new GOOD data across a
 broader scenario mix. Option C is a simultaneous Y-placement fix
 candidate but should wait until the timing bug is understood.
 
+## Run 2026-04-14 Test JJ — leading-edge trigger flag ON, 20-lap mixed
+
+First on-device run with `useLeadingEdgeTrigger = true` compiled in.
+Purpose: calibrate the gate-col run thresholds and evaluate whether
+the new trigger (height + growth + decisive hatch) + `snapDetYToGateRun`
+actually fixes Test II's 62% failure rate.
+
+Scenario order (intended 20 crossings):
+
+1. 6 × small-step walk, arms at sides
+2. 4 × big-step walk
+3. 6 × jog with arm motion
+4. 4 × jog with arms pinned
+
+### Fire outcomes and user verdicts
+
+Detector fired **14/20**. User-verdicted:
+
+| Lap | Scenario     | Fired | Verdict           | Issue                                     |
+|-----|--------------|-------|-------------------|-------------------------------------------|
+| 1   | walk-small   | Y     | GOOD              | —                                         |
+| 2   | walk-small   | Y     | GOOD              | —                                         |
+| 3   | walk-small   | Y     | GOOD              | —                                         |
+| 4   | walk-small   | Y     | BAD placement     | dot on chin (Δy ≈ +46)                    |
+| 5   | walk-small   | Y     | GOOD              | —                                         |
+| 6   | walk-small   | Y     | BAD timing        | "way too late"                            |
+| 7   | big-step     | Y     | marginal          | "maybe a frame too early"                 |
+| 8   | big-step     | Y     | GOOD              | —                                         |
+| 9   | big-step     | Y     | GOOD              | —                                         |
+| 10  | big-step     | Y     | BAD timing        | "way too late"                            |
+| 11  | jog + arms   | Y     | GOOD              | —                                         |
+| 12  | jog + arms   | Y     | GOOD              | —                                         |
+| 13  | jog + arms   | Y     | GOOD              | —                                         |
+| 14  | jog + arms   | Y     | GOOD              | —                                         |
+| 15–20 | jog+arms / jog-pinned remainder | N | rejected | ~6 non-fires |
+
+Net: 11 clean GOODs, 1 marginal, 2 BAD placement/timing, ~6 missed
+crossings. Big improvement over Test II (6 GOOD / 10 BAD), with the
+trigger now in the right region but three distinct residual failures.
+
+### Evidence from `[LEADING_EDGE]` / `[DETY_SNAP]` logs
+
+1. **Successful-fire gate-col runs cluster 61–88 px.** The decisive
+   threshold `max(60, 0.50 × blobH)` evaluates to ≈117 on typical
+   blobH ≈ 234 — so `decisivePass` literally never fires. Our "escape
+   hatch" is dead code at current calibration.
+2. **~3 rejections are near-2× growth misses.** Frame 2705 run
+   31 → 59 (ratio 1.90) and frame 3702 run 45 → 83 (ratio 1.84): both
+   clear the height gate but fail `growthPass` by single-digit
+   margins. A working decisive hatch at a realistic threshold would
+   catch them; so would removing growth entirely.
+3. **Lap 4 chin bug traced to `snapDetYToGateRun` selection.** That
+   frame's gate column had two runs: a 5-px arm/hand run at y=107..111
+   and an 85-px torso run at y=134..218. Candidate `detY = blob.minY
+   + 0.30 × blobH` landed between them; snap picked the *nearest*
+   (arm) over the *longest* (torso). Dot landed on chin.
+4. **Lap 6 / lap 10 "way too late" fires.** Separate failure mode
+   from placement. Both fired several frames after the torso's
+   leading edge had cleared the gate. The first frames with a real
+   leading edge had incomplete masks (growth didn't cleanly double
+   in continuous-mask walk), so detection deferred until a much
+   later frame coincidentally satisfied all gates.
+5. **One snap-rejection** (frame 1054): candidate Y=156, no gate-col
+   run within radius 46. Expected behavior (limb-only frame).
+
+### Three-category failure taxonomy
+
+| Category   | Laps       | Root cause                                            |
+|------------|------------|-------------------------------------------------------|
+| Placement  | 4          | `snapDetYToGateRun` prefers nearest over longest run  |
+| Late timing| 6, 10      | Growth-ratio rule waits too long in continuous mask   |
+| Rejection  | 15–20 (~6) | Growth fails near-2× on legit torso arrivals          |
+
+Plus 1 marginal (lap 7, "maybe a frame early"). No environmental
+false fires observed.
+
+### Structural insight from Test JJ + re-read of PF docs
+
+Torso runs cluster 61–88 px, arm/hand runs 5–20 px, leg runs 20–45 px
+— cleanly separable at ~50 px. Combined with `detection_spec.md`
+(PF picks "frontmost qualifying torso surface"), the arm-only-never-
+fires evidence, `detector_hypotheses.md` §2.9 bug ("longest run
+anywhere picks shin-band"), and raw_test_results.md 12f (book sharp
+corner waits), the three failures collapse into **a single missing
+rule**:
+
+> Each frame, find contiguous vertical mask runs at the gate column.
+> If any run has length ≥ `max(50, 0.25 × blobH)`, fire; detY is
+> the center of the topmost qualifying run. No temporal state.
+
+This stateless rule handles all three failure categories at once:
+placement (lap 4 — short arm run fails qualification), late timing
+(laps 6/10 — fire on first frame the run reaches 50, no growth wait),
+and growth rejections (near-2× frames already have qualifying runs).
+
+Fix direction chosen: replace the growth + decisive + snap logic with
+the stateless qualifying-run rule, behind the existing
+`useLeadingEdgeTrigger` flag. Plan file:
+`/Users/sondre/.claude/plans/calm-sprouting-meerkat.md` (Post-Test-JJ
+structural simplification section).
+
+### Next step
+
+Test KK: same 20-crossing structure as JJ. Pass criteria:
+
+- 11 Test-JJ GOODs still fire GOOD (plus lap 7 marginal cleans up).
+- Lap-4-equivalent places dot on torso (Δy ≤ 15).
+- Lap-6/10-equivalents fire earlier (not "way too late").
+- Arm-only crossings (2 sanity laps) don't fire.
+- Optional leg-swipe sanity: no fire until torso arrives.
+
+## Run 2026-04-14 Test MM — `[GATE_RUNS_FULL]` diagnostic + parallel Photo Finish
+
+Session: `session_2026-04-14_212648.log` (front camera, 180×320).
+Config: §24 two-tier prefilter ON, §25 `[GATE_RUNS_FULL]`
+diagnostic ON (no fire-gate change yet). Parallel Photo Finish
+capture on same phone pointing at same gate line — user verdict:
+"Photo Finish fired perfectly" on all 6 laps.
+
+### Per-lap table
+
+| # | Fire frame | t (s) | detY | userY | Δy | userX | Verdict |
+|--:|-----------:|------:|-----:|------:|----|------:|---------|
+| 1 | 114  | 3.774  | 169 | 170 | +1  | 92  | GOOD |
+| 2 | 184  | 6.722  | 133 | 141 | +8  | 100 | GOOD, "maybe a few cm early" |
+| 3 | 265  | 9.418  | 175 | 159 | −16 | 133 | **LATE — behind body** |
+| 4 | 348  | 12.229 | 164 | 157–159 | −5..−7 | 76–84 | GOOD |
+| 5 | 695  | 23.793 | 168 | 149 | −19 | 49 (L>R) | **LATE — back of body** |
+| 6 | 770  | 26.310 | 161 | 141–146 | −15..−20 | 146–153 | **LATE — back of body** |
+
+Plus one crossing rejected (frames 487–610 region). Arm-only reject
+band in frames 487–502, 547–553, 854–855: all `qrLen ≤ 9`, hasQR=N,
+fill_ratio reject (arm safety intact).
+
+### `[GATE_RUNS_FULL]` near-miss evidence on late-fire preceding frames
+
+| Frame | longest | mergedMax2 | mergedMax4 | floor | Mechanism |
+|------:|--------:|-----------:|-----------:|------:|-----------|
+| f261 (→ lap 3) | 42 | 42 | 42 | 50 | **single-run — H-DIAGONAL-TORSO** |
+| f262 (→ lap 3) | 32 | 44 | 44 | 50 | weak merge benefit, still < 50 |
+| f602 (→ rejected) | 36 | 44 | 44 | 50 | weak merge, still < 50 |
+| f689 (→ lap 6) | 26 | 26 | 26 | 50 | single-run band, far below |
+| f692 (→ lap 6) | 30 | 59 | **67** | 50 | **fragmentation — merge fires** |
+| f694 (→ lap 5) | 29 | 39 | 49 | 50 | fragmentation, 1 px shy |
+| f768 (→ lap 6) | 27 | 40 | **56** | 50 | **fragmentation — merge fires** |
+
+### Observations
+
+- Both hypotheses confirmed coexisting in same session: lap 3 is a
+  single-run diagonal torso (raw ≈ merged) while laps 5/6 show
+  strong fragmentation (merged far exceeds raw).
+- Photo Finish fires on-torso on every lap → PF parity does not
+  excuse the late fires; this is our bug to fix.
+- Arm-only fill_ratio rejects never reached the `[GATE_RUNS_FULL]`
+  near-miss band (longest ≥ 25) — arm-safety of the 50 px floor
+  preserved under current geometry.
+- The §24 two-tier prefilter did not leak to arm-only blobs: every
+  arm-only reject line shows `hasQR=N qrLen ≤ 9`, i.e. lenient
+  tier never activated.
+
+### Decision (§25)
+
+Ship gap-merge (`gateRunMergeMaxGap = 4`) in §23 fire gate + §24
+tier check. Expected: laps 5 and 6 fire on torso instead of
+trailing leg. Lap 3 may still late-fire (single-run diagonal
+cannot be rescued by merging); revisit with a conservative floor
+drop (e.g. `max(40, 0.18 × blobH)`) only if follow-up test confirms
+lap-3-type failures persist.
+
+### Next step
+
+Test NN: same 6-lap sprint scenario with the shipped gap-merge,
+again with parallel PF. Pass if laps 5 and 6 fire on torso with
+`userX` within ±15 of gate column (90). Lap 3 is informational —
+if it still late-fires, decide on floor drop; if PF also fires
+late on the diagonal lap, leave as PF-parity.
+
+
