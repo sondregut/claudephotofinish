@@ -3454,3 +3454,171 @@ single-run diagonal. Arm-only swipes still reject (`mergedMax4`
 equals `longest` when no neighbors — floor unchanged).
 
 ---
+
+## §25 validation — Test NN (2026-04-14)
+
+§25 `gateRunMergeMaxGap = 4` held up in Test NN. 6/8 laps GOOD
+(vs Test MM 3/7). Sprint laps 5 and 6 — the exact fragmentation
+targets — fired on torso (Δy = +1, +17). Walking laps 7 and 8 clean.
+No arm-only false fires observed.
+
+Two remaining late-fires (laps 2 and 4) are **not** gap-merge
+failures — fire-frame merged runs were 92 and 72 px (well above the
+50 px floor). We fired on the trailing edge of the body; the miss
+is on the approach frames, where either:
+
+- the approach-frame gate-col profile was a single diagonal run
+  `< 50 px` with no neighbors (→ §26 H-GATE-PROJECTION-WINDOW
+  territory, like Test MM lap 3 / f261), or
+- the approach-frame blob was prefilter-rejected (fill / aspect /
+  height).
+
+Test OO will `[GATE_RUNS_FULL]` + `[REJECT]` grep frames f210–f239
+and f380–f404 to distinguish.
+
+§25 status: **shipped, validated**. No regression to arm safety
+(arm-only rejects still show `qrLen ≤ 9`). Placement issue on lap 3
+(topmost merged run fuses head + upper chest → detY lands near
+head) is a detY-picker concern, **not** §25's job to fix — tracked
+separately as a future "pick the centre of the torso segment of
+the merged run" refinement only if user flags it as material.
+
+---
+
+## §27 H-FLOOR-CAP (2026-04-15)
+
+Test NN approach-frame grep surfaced a floor-scaling bug. The
+§23 qualifying-run rule is
+
+```
+minReq = max(torsoRunAbsMin, Int(torsoRunHeightFrac × blobH))
+       = max(50,             Int(0.25            × blobH))
+```
+
+Intent: scale the floor with athlete size so a small/distant body
+still needs a proportionate vertical run. Flaw: `blobH` is the
+bounding box, not the torso. A sprint stride extends the bbox from
+knees + raised arms + hair — on Test NN laps 2 and 4, `blobH`
+hit 249 and 238, pushing `minReq` to 62 and 59. The actual torso
+at the gate column was 54 px (f235, merged) and 44 px (f402,
+merged) — well above the 50 px absolute arm-safety floor but
+below the inflated relative floor.
+
+### Evidence
+
+| Lap | Frame | blobH | mergedMax4 | minReq | Gap | Late-fire consequence |
+|----:|------:|------:|-----------:|-------:|----:|-----------------------|
+| 2 | f235 | 249 | 54 | 62 | −8 | fires 4 frames later at userX=40 (past gate) |
+| 4 | f402 | 238 | 44 | 59 | −15 | fires 2 frames later at userX=60..66 (past gate) |
+
+Lap 5 f474 is a positive control: `blobH=227`, `minReq=56`,
+merged=61 → fires on time.
+
+### Proposed code change (NOT SHIPPED)
+
+Cap `minReq` upper bound so oversized bboxes don't inflate the
+floor:
+
+```swift
+// §27 H-FLOOR-CAP. Prevent minReq from exceeding a sensible
+// torso ceiling even when blobH is inflated by raised arms,
+// stride separation, or hair/feet at frame edges.
+private let torsoRunAbsMax: Int = 55
+let minReq = max(torsoRunAbsMin,
+                 min(torsoRunAbsMax,
+                     Int(torsoRunHeightFrac * Float(blobH))))
+```
+
+With `torsoRunAbsMax = 55`: lap 2 f235 merged=54 still fails
+(one px shy — acceptable, marginal), lap 4 f402 merged=44 still
+fails (well below 55). So cap alone doesn't fully rescue those
+frames — see §28.
+
+### Arm safety
+
+A pure arm swipe at the gate column produces a single run of
+~20 px (see f232 lap 2 approach: gate-col `lng=18`, blobH=214).
+Capping the floor at 55 doesn't lower arm-safety because arm
+swipes are far below both 50 and 55.
+
+### Status
+
+Proposed, not shipped. Test OO will pair this with §28 and
+re-run the sprint scenario.
+
+---
+
+## §28 H-PICKER-LARGEST (2026-04-15)
+
+Test NN lap 4 f401 evidence: §23 picked `pickedIdx=0` =
+topmost qualifying merged run `97..149:53`, fire emitted at
+detY=123, then `EMPTY_STRIP` rejected because the ±strip at
+detY=123 was width 0. The *largest* merged run was
+`168..261:94` (idx 1) — the actual torso — which would have
+given detY = 168 + 0.30×94 = 196 and would not have been empty.
+
+### Why topmost is fragile
+
+Gap-merge fuses fragments ≤ 4 px apart. A head + upper chest +
+shoulder set of short runs with tiny gaps can merge into a
+"qualifying" run that isn't contiguous mask — it's stitched
+across gaps. When §23 then projects a ±horizontal strip at
+`startY + 0.30 × len`, the strip can land in one of the merge
+gaps where the mask is empty → EMPTY_STRIP reject → no fire.
+
+The largest merged run, by contrast, is almost always dominated
+by a single long contiguous mask section (torso), and
+`0.30 × len` lands inside the densest part of it.
+
+### Proposed code change (NOT SHIPPED)
+
+Replace "first qualifying merged run (topmost)" with "longest
+qualifying merged run":
+
+```swift
+// §28 H-PICKER-LARGEST. Prefer the longest merged run over the
+// topmost when both clear minReq. Topmost can be stitched head
+// + shoulder fragments that fail EMPTY_STRIP; longest is
+// dominated by a single contiguous torso section.
+var pickedIdx = -1
+var pickedLen = 0
+for (i, run) in frameGateRunsMerged.enumerated() {
+    let len = run.endY - run.startY + 1
+    if len >= minReq && len > pickedLen {
+        pickedIdx = i
+        pickedLen = len
+    }
+}
+```
+
+### Interaction with §23, §25, §27
+
+- §25 gap-merge: still applies; this only changes which merged
+  run wins when multiple qualify.
+- §23 qualifying-run floor: unchanged.
+- §27 floor cap: independent; both can ship together.
+- Arm safety: arm swipes produce a single short run that fails
+  the floor regardless of picker. No regression.
+
+### Behavioral-requirements check
+
+1. Torso crossings: better — picker now anchors to densest run.
+2. Hand swipes: no change — single short run, fails floor.
+3. Leg-only motion: no change — legs are below torso and a
+   standalone leg run is typically short (<30 px) and fails
+   floor.
+4. Lighting: unchanged.
+5. Fast/slow: better on fast (fixes Test NN laps 2, 4).
+6. Forward lean: likely better — lean makes the torso run
+   longer relative to head/shoulder fragments.
+7. Front/rear cam: unchanged.
+8. Double-fire: unchanged (cooldown still applies).
+9. Environmental motion: unchanged.
+
+### Status
+
+Proposed, not shipped. Test OO will combine §27 + §28 and
+compare against Test NN laps 2, 4, and the positive controls
+(laps 1, 3, 5, 6, 7, 8).
+
+---

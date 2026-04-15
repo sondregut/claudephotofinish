@@ -5402,3 +5402,135 @@ if it still late-fires, decide on floor drop; if PF also fires
 late on the diagonal lap, leave as PF-parity.
 
 
+
+## Run 2026-04-14 Test NN — §25 gap-merge validation (sprint + walk, parallel PF)
+
+Session: front camera, 180×320. §25 `gateRunMergeMaxGap = 4`
+SHIPPED (commit `c21f293`). 8 crossings: 6 sprint-style, 2 walking
+(laps 7, 8). Parallel Photo Finish capture on all laps.
+
+### Per-lap table
+
+| # | Fire frame | detY | userY | Δy | userX | Picked merged run | pickedLen | Verdict |
+|--:|-----------:|-----:|------:|----|------:|-------------------|----------:|---------|
+| 1 | 140 | 179 | 159–162 | −17..−20 | 85–88 | — | — | GOOD |
+| 2 | 239 | 180 | 163 | −17 | **40** | 135..226 | 92 | **LATE — back of body** |
+| 3 | 317 | 122 | 159 | +37 | 95 | 90..155 (idx 0) | 66 | GOOD but fires high (near head) |
+| 4 | 404 | 149 | 151–155 | +2..+6 | **60–66** | 114..185 | 72 | **LATE — mid body** |
+| 5 | 474 | 156 | 157 | +1 | 87 | — | — | GOOD |
+| 6 | 553 | 123 | 140 | +17 | 85 | — | — | GOOD |
+| 7 | 641 | 123 | 156 | +33 | 89 | — | — | GOOD (walking) |
+| 8 | 719 | 196 | 195 | −1 | 87 | — | — | GOOD (walking) |
+
+### Observations
+
+- **§25 gap-merge validated:** 6/8 GOOD. Biggest improvement vs
+  Test MM (3/7 GOOD). Sprint laps 5 and 6 — the exact fragmentation
+  cases §25 targeted — are now clean (Δy = +1 and +17).
+- **Lap 3 placement-high:** merged runs were
+  `[90..155:66, 174..212:39, ...]`. §23 picks the topmost qualifying
+  merged run (idx 0 = 90..155, len 66), so `detY = 90 + 0.30 × 66 =
+  122`. User is at `userY = 159` (mid-chest). The 90..155 run likely
+  includes head + upper chest fused — torsoFraction=0.30 of a
+  head-inclusive run places the dot too high. User note: "high and
+  low doesn't matter as much" — defer fix.
+- **Laps 2 and 4 still late-fire:** `userX = 40` (lap 2) and `60–66`
+  (lap 4) mean the user's torso was already past the gate column
+  (90) when we fired. Fire-frame merged runs are long (92, 72 px),
+  both well over the 50 px floor — so it's not a qualifying-run
+  failure at f239/f404. It's that we should have fired on an earlier
+  frame where the torso was at the gate.
+
+### Open question for lap 2 + lap 4 late fires
+
+Two candidates for why we missed the earlier-frame fire:
+
+- **§26 H-GATE-PROJECTION-WINDOW candidate:** on the approach
+  frame, the torso slice at the gate column was a diagonal single
+  run < 50 px and had no neighbors at that column to merge
+  (H-DIAGONAL-TORSO, like Test MM lap 3 / f261). Needs
+  `[GATE_RUNS_FULL]` on the frames preceding f239 and f404.
+- **Prefilter rejection:** approach-frame blob was rejected by fill
+  / aspect / height before it reached §23. Needs `[REJECT]` grep in
+  the same window.
+
+### Next step
+
+Test OO: user grep the session log for:
+
+1. `[GATE_RUNS_FULL]` entries in the frame windows f210–f239 and
+   f380–f404. Each entry shows raw `runs=[...]`, gaps, `mergedMax4`.
+   - If `mergedMax4 ≥ 50` on a pre-fire frame → gap-merge already
+     rescued but §23 didn't pick — bug in §23 picker / prefilter.
+   - If `longest ≈ mergedMax4 < 50` (single run) on pre-fire frames
+     → **H-DIAGONAL-TORSO**, ship §26 OR-projection.
+   - If no `[GATE_RUNS_FULL]` in the window → blob didn't even
+     produce a gate-column run ≥ 25 px. Check `[REJECT]`.
+2. `[REJECT]` entries in the same windows.
+
+No new code changes until evidence isolates mechanism.
+
+### Test NN approach-frame evidence (from pasted log)
+
+Session file: `session_2026-04-14_213830.log`. Each entry below is a
+pre-fire frame that *should* have fired but was rejected by §23.
+
+**Lap 2 approach (fire f239, userX=40 = already past gate):**
+
+| Frame | longest | mergedMax4 | picked merged | minReq | blobH | Reject reason |
+|------:|--------:|-----------:|---------------|-------:|------:|---------------|
+| f232  | 20      | —          | —             | —      | 214   | local_support (gate col=18, need=25) |
+| f233  | 19      | 33         | 163..195:33   | 56     | 224   | gate_col_run 33 < 56 |
+| f234  | 24      | 47         | 232..278:47   | 52     | 208   | gate_col_run 47 < 52 |
+| f235  | 47      | **54**     | 174..227:54   | **62** | **249** | **gate_col_run 54 < 62 — merged cleared 50, floor didn't** |
+| f237  | 29      | 39         | 70..108:39    | 63     | 255   | gate_col_run 39 < 63 |
+| f239  | 40      | **92**     | 135..226:92   | 50     | 192   | **fires**, but userX=40 = late |
+
+**Lap 4 approach (fire f404, userX=60..66 = already past gate):**
+
+| Frame | longest | mergedMax4 | picked merged | minReq | blobH | Reject reason |
+|------:|--------:|-----------:|---------------|-------:|------:|---------------|
+| f398  | 16      | —          | —             | —      | 227   | local_support |
+| f400  | 16      | —          | —             | —      | 192   | local_support |
+| f401  | 78      | 94         | 97..149:**53** (idx 0) | 50 | 179 | **fired then EMPTY_STRIP rejected** (torso strip at detY=123 had width 0) |
+| f402  | 25      | **44**     | 86..129:44    | **59** | 238   | gate_col_run 44 < 59 |
+| f403  | —       | —          | —             | —      | 186   | local_support |
+| f404  | 21      | **72**     | 114..185:72   | 61     | 245   | **fires**, but userX=60..66 = late |
+
+### Mechanism (NOT §26 OR-projection territory)
+
+Two distinct bugs show up in the approach frames:
+
+1. **H-FLOOR-RISES-WITH-BLOBH.** `minReq = max(50, 0.25 × blobH)`.
+   As the blob's total height grows (raised arms, feet-near-floor
+   included, hair at top of frame), the floor rises faster than the
+   merge gain. Lap 2 f235 `mergedMax4=54` would clear the 50 px
+   absolute floor but fails the 62 px relative floor (blobH=249).
+   Lap 4 f402 same pattern: merged=44 vs floor=59 (blobH=238).
+   §25 gap-merge is doing its job — the floor is swallowing the gain.
+
+2. **H-PICKER-LARGEST (lap 4 f401 specifically).** The picker
+   chooses the *topmost* qualifying merged run. On f401 that was
+   `97..149:53` (idx 0), but that run is gap-fused fragments
+   (originals include `97..99:3, 103..103:1, 106..114:9,
+   119..122:4, 126..149:24` merged over gaps ≤ 4). The torso
+   column strip at detY=123 is empty, so `EMPTY_STRIP` rejected
+   the fire. The *largest* merged run was `168..261:94` (idx 1) —
+   that's the real torso. Picking topmost-qualifying made the
+   detector prefer a thin fragmented group of head/shoulder
+   fragments over the fat body run below.
+
+### Next step
+
+Test OO (docs-only decision): evaluate whether to
+
+- **Cap the floor** at e.g. `max(40, min(55, 0.25 × blobH))` so
+  lap 2 f235 (merged=54) and lap 4 f402 (merged=44, still short
+  but closer) would fire earlier, **OR**
+- **Change picker to largest merged qualifying run** (fixes lap 4
+  f401 directly — 94 px torso would be picked, no empty strip),
+  **OR**
+- Both in combination.
+
+Neither change is shipped until a fresh sprint test with parallel
+PF reproduces the mechanism on independent data.
