@@ -4395,3 +4395,200 @@ with §35 active."
 
 ---
 
+## §37 H-LIMB-WAIT-RELEASE (2026-04-15)
+
+Test WW (outdoor, ~8 ms exposure, good lighting, parallel PF)
+showed we fired 9/16 crossings vs PF's 16/16. User attributed
+the 7 misses to "big stepping with arms to the side of body"
+— running frames where only lower-half qualifiers (legs/hip
+cluster) form at the gate column. §35 H-TEMPORAL-WAIT
+correctly suppressed those frames waiting for a torso-zone
+qualifier, but on "big step" crossings no upper-half
+qualifier ever formed → silent miss → no timestamp at all.
+
+PF detects those same crossings. We don't know yet how PF
+finds the torso in those frames; our detector gives up.
+
+### Rule
+
+Count consecutive frames where §35 would suppress (at least
+one qualifier present but all in lower half). After
+`limbWaitReleaseAfter = 3` consecutive `[LIMB_WAIT]` frames,
+the next frame *releases* the suppression: qualifying
+indices become the raw set (including lower-half), and §31/
+§30 proceed normally. Streak clears whenever a frame has an
+upper-half qualifier (normal fire) or no qualifier at all
+(body left the gate).
+
+### Log
+
+- `[LIMB_WAIT] frame=N ... streak=K` — suppression continues,
+  streak incremented.
+- `[LIMB_WAIT_RELEASE] frame=N ... streak=K threshold=3` —
+  fallback engaged; streak reset; fire allowed on lower-half
+  qualifier.
+
+### Honest framing
+
+This is **not PF parity** — PF clearly detects the torso in
+big-step frames. Released fires land on the leg/hip of the
+runner (Δy likely ~30–50 px). The fallback is a pragmatic
+band-aid so we always produce a timestamp instead of missing
+the crossing entirely. The `[LIMB_WAIT_RELEASE]` log count
+is a metric for how much of our PF parity gap we're
+papering over; if it fires often, we have real detection
+work to do.
+
+### Status
+
+Shipped 2026-04-15. One-location edit in §23 picker block,
+~25 lines. Streak state cleared on `start()`.
+
+---
+
+## §38 H-THICK-STRIP-CHECK (2026-04-15)
+
+### Observation
+
+Test WW had two `[EMPTY_STRIP]` rejects (f1312, f1421) where
+a qualifying run existed (picked run length 115–126 px, width
+at centerY = 11), but the final single-column strip check at
+`detY` produced `stripWidth=0` → reject. Both were silent
+missed crossings.
+
+The single-column strip check is inconsistent with §34's
+shipped 9-column thick gate projection. The picker picks a
+run from a 9-col thick projection; the final strip
+verification at detY samples only the 1-col gate line.
+Result: a valid hollow-torso frame where the thick gate
+sees mass but detY's exact row has zero at gateColumn gets
+wrongly rejected.
+
+### Rule
+
+When the single-column strip check returns `stripWidth = 0`,
+probe the full 9-col band (`gateColumn ± thickGateHalf`,
+i.e. x = 86..94) at `detRow`. If any column has a mask
+pixel, the body IS present at this row — allow the fire
+with interpolation fraction defaulting to 0.5. Only reject
+if all 9 columns are zero at detRow.
+
+### Log
+
+- `[EMPTY_STRIP_THICK_PASS] frame=N detY=Y gateColStrip=0
+  thickBand=x86..x94 hasMask=Y action=allow` — §38 saved
+  the fire.
+- `[EMPTY_STRIP] frame=N detY=Y stripWidth=0 thickBand=empty
+  action=reject` — both single and thick empty; true reject.
+
+### Behavioral check
+
+1. Torso crossings with clean mask: single-col is non-zero,
+   §38 path untouched.
+2. Hollow-torso frames where thick band has edge-only mask:
+   §38 saves the fire. Interpolation falls through to
+   `fraction = 0.5` (default when stripWidth=0).
+3. Genuine no-mask-at-detY frames: both checks empty,
+   reject unchanged.
+
+### Status
+
+Shipped 2026-04-15. ENGINE_CONFIG adds
+`emptyStrip=col9_band`. ~15 lines.
+
+---
+
+## §40 H-SHORT-RUN-STRETCH (2026-04-15)
+
+### Observation
+
+Test WW L1 (Δy +62 head-fire), L7 (+32 forward-lean
+head-fire), L8 (+49 forward-lean head-fire) all share a
+pattern: the picked qualifying run is short relative to the
+blob (head + shoulders + upper-chest only; no torso run
+formed at the gate because of a hollow-body gap between
+upper body and hip). §30's 30%-from-top placement then
+anchors detY on the forehead/eye area.
+
+Specifically: L1 run 94..147 endY=147 vs blob 94..288 (endY
+is at 27% down from blobTop); L7 run 121..213 endY=213 vs
+blob 117..319 (endY at 48% down); L8 run 108..184 endY=184
+vs blob 103..319 (endY at 37% down). In all three cases the
+picked run ends in the upper portion of the blob.
+
+### Rule
+
+If `pickedRun.endY < blob.minY + 0.6 × blob.height` (picked
+run doesn't reach the lower 40% of the blob), treat it as a
+short head/shoulder run and anchor `detY = run.startY + 0.70
+× run.length` instead of the default 0.30 from top. Places
+the dot near the run's bottom (neck/upper-chest), which is
+closer to the actual torso position on a hollow-body frame.
+
+Dry-run on Test WW:
+- L1: runEndY=147, threshold 94+0.6·194=211 → stretch →
+  detY 94+0.70·53=131 (was 109, user 171). Δy+40 → improves.
+- L7: runEndY=213, threshold 117+0.6·202=238 → stretch →
+  detY 121+0.70·92=185 (was 148, user 180). Δy−5 → near
+  perfect.
+- L8: runEndY=184, threshold 103+0.6·216=232 → stretch →
+  detY 108+0.70·76=161 (was 130, user 179). Δy+18 → improves.
+
+GOOD fires in Test WW (L2, L4, L6, L9): picked runs extend
+past 0.6 × blobH → stretch does NOT engage → fire unchanged.
+
+### Log
+
+- `[SHORT_RUN_STRETCH] frame=N pickedIdx=K runEndY=E
+  blobBottom=B stretchTriggerY=T detY=Y fraction=0.70` when
+  stretch engages.
+
+### Behavioral check
+
+1. Clean torso crossings (Test QQ indoor): picked run spans
+   torso → endY past 0.6·blobH → no stretch. Unaffected.
+2. Forward leans with head+chest qualifier (L7/L8): stretch
+   engages, anchors lower in the run → improves placement.
+3. Walks / slow crossings with hollow torso (L1): stretch
+   engages, still not perfect (no real torso mass to anchor
+   to), but closer.
+4. Hand swipes: already rejected by length floor.
+
+### Status
+
+Shipped 2026-04-15. Constants `shortRunStretchBlobFraction
+= 0.6`, `shortRunStretchFraction = 0.70`. ~15 lines.
+
+---
+
+## §41 H-EARLY-ENTRY-QUALIFIER (proposed, not shipped)
+
+Test WW L3 (Δy−17) and L5 (Δy−15) both fired with body
+already past gate (L3 centroidX=106, L5 centroidX=126,
+gate=90). User verdict: "back of body" — we fired too late.
+On earlier frames (L3 f696: single-col longest=44), the
+body's leading edge was at the gate but the gate-col run was
+below the 55 px qualifier floor. By the time the qualifier
+formed, the body had moved past.
+
+PF fires these crossings on the correct frame (per user's
+"PF fires on torso"), which means PF tolerates a shorter
+gate-col qualifier on early-entry frames, or uses a
+different detection primitive.
+
+Candidate rule: lower `torsoRunAbsMin` (or the derived
+`minRequired`) on low-gateBuildup frames (0–1). E.g. on the
+first frame a gate-intersecting blob appears, accept ≥ 35
+px instead of ≥ 55. Once buildup ≥ 2, raise back to
+standard.
+
+Risk: false-fires on thin limb entries (thumb/leg tip). §35
+upper-half filter and blob-geometry prefilters may still
+contain this.
+
+Not shipped — needs controlled physical test (thin-object
+entry) to verify safety, plus parallel-PF evidence that
+confirms the "early fire" behavior.
+
+---
+

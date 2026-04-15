@@ -181,6 +181,28 @@ final class DetectionEngine {
     // guard — no other pipeline changes.
     private let thickGateHalf: Int = 4
 
+    // §37 H-LIMB-WAIT-RELEASE (shipped 2026-04-15). Tracks consecutive
+    // frames where §35 suppressed a fire (only lower-half qualifiers
+    // present). After this many consecutive waits on the same gate-
+    // intersecting sequence, the next frame releases the suppression and
+    // allows a lower-half fire rather than silently missing the entire
+    // crossing. Pragmatic band-aid for PF-parity: PF detects torso even
+    // in "big step" frames, we don't yet, so better to emit a lower-half
+    // timestamp than miss the crossing.
+    private let limbWaitReleaseAfter: Int = 3
+    private var limbWaitStreak: Int = 0
+
+    // §40 H-SHORT-RUN-STRETCH (shipped 2026-04-15). When the picked §23
+    // qualifying run doesn't reach the lower portion of the blob bbox,
+    // it's a head/shoulder/upper-chest run on a hollow-torso frame, and
+    // §30's 30%-from-top placement lands on the forehead. Instead,
+    // anchor detY at 70%-from-top of the picked run (near the bottom of
+    // the run, i.e., neck/upper-chest) so the dot lands closer to the
+    // real torso. Trigger: picked run's endY falls in the upper 60% of
+    // the blob bbox.
+    private let shortRunStretchBlobFraction: Float = 0.6
+    private let shortRunStretchFraction: Float = 0.70
+
     // Session state
     private(set) var isActive = false
     var isFrontCamera = false
@@ -234,6 +256,7 @@ final class DetectionEngine {
         lastDetectionRealElapsed = nil
         gateOccupied = false
         gateBuildup = 0
+        limbWaitStreak = 0
         candidateHHistory = [0, 0]
         currentFrameMaxCandidateH = 0
         gateBandHistory.removeAll()
@@ -257,7 +280,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d temporalWait=upperHalf",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d temporalWait=upperHalf limbWaitReleaseAfter=%d emptyStrip=col9_band shortRunStretch=blobTop+%.2f×H shortRunStretchFraction=%.2f",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, thickGateHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -268,7 +291,9 @@ final class DetectionEngine {
             spikeRatioThreshold, warmupFrames, cooldown,
             useLeadingEdgeTrigger ? "ON" : "off",
             torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap,
-            gateBandHalf
+            gateBandHalf,
+            limbWaitReleaseAfter,
+            shortRunStretchBlobFraction, shortRunStretchFraction
         ))
     }
 
@@ -706,19 +731,44 @@ final class DetectionEngine {
             // qualifier exists we pick it; if none exists we suppress the
             // fire and wait for a better frame.
             let blobMidY = candidate.comp.minY + candidate.comp.height / 2
-            let qualifyingIndices = rawQualifyingIndices.filter {
+            let upperHalfIndices = rawQualifyingIndices.filter {
                 frameGateRunsMerged[$0].startY < blobMidY
             }
-            let limbSuppressed = !rawQualifyingIndices.isEmpty
-                                 && qualifyingIndices.isEmpty
+            // §37 H-LIMB-WAIT-RELEASE. If we've already suppressed
+            // limbWaitReleaseAfter frames in a row with the same
+            // all-lower-half pattern, release the suppression on this
+            // frame and allow the fire. Otherwise apply §35 filtering.
+            let wouldSuppress = !rawQualifyingIndices.isEmpty
+                                && upperHalfIndices.isEmpty
+            let releasedByFallback = wouldSuppress
+                                     && limbWaitStreak >= limbWaitReleaseAfter
+            let qualifyingIndices: [Int]
+            if releasedByFallback {
+                qualifyingIndices = rawQualifyingIndices
+                slog(String(format:
+                    "[LIMB_WAIT_RELEASE] frame=%d blobMidY=%d rawQualifiers=%d streak=%d threshold=%d",
+                    frameIndex, blobMidY, rawQualifyingIndices.count,
+                    limbWaitStreak, limbWaitReleaseAfter))
+                limbWaitStreak = 0
+            } else {
+                qualifyingIndices = upperHalfIndices
+            }
+            let limbSuppressed = wouldSuppress && !releasedByFallback
             if limbSuppressed {
                 let lowestStartY = rawQualifyingIndices
                     .map { frameGateRunsMerged[$0].startY }
                     .min() ?? -1
+                limbWaitStreak += 1
                 slog(String(format:
-                    "[LIMB_WAIT] frame=%d blobMidY=%d rawQualifiers=%d allLowerHalf=Y lowestStartY=%d",
+                    "[LIMB_WAIT] frame=%d blobMidY=%d rawQualifiers=%d allLowerHalf=Y lowestStartY=%d streak=%d",
                     frameIndex, blobMidY, rawQualifyingIndices.count,
-                    lowestStartY))
+                    lowestStartY, limbWaitStreak))
+            } else if !wouldSuppress {
+                // Clear the streak whenever we have a normal frame with
+                // at least one upper-half qualifier (or no qualifiers at
+                // all — the body has left the gate so the crossing
+                // sequence is done).
+                limbWaitStreak = 0
             }
 
             let runsDesc = frameGateRuns
@@ -777,13 +827,33 @@ final class DetectionEngine {
                 if q.width > 0 {
                     pickedIdx = q.idx
                     let run = frameGateRunsMerged[q.idx]
-                    // §30 H-DETY-FRACTION-INSIDE-PICKED-RUN. Anatomical
-                    // anchor: 30% from the top of the picked merged
-                    // run. Scale-invariant (works for close and distant
-                    // crossings) because the fraction is of the run's
-                    // own length, not a pixel constant.
-                    torsoDetY = run.startY
-                        + Int(Float(run.endY - run.startY) * 0.30)
+                    // §30 H-DETY-FRACTION-INSIDE-PICKED-RUN: 30% from top
+                    // of the picked merged run. Scale-invariant.
+                    //
+                    // §40 H-SHORT-RUN-STRETCH (shipped 2026-04-15). When
+                    // the picked run ends in the upper 60% of the blob
+                    // bbox, it's a head/shoulder/upper-chest run on a
+                    // hollow-torso frame (no torso qualifier formed),
+                    // and 30%-from-top lands on the forehead. Anchor at
+                    // 70%-from-top of the picked run instead — lands on
+                    // neck/upper-chest, closer to the real torso
+                    // position. Test WW L1/L7/L8 dry-run: Δy +62→+39,
+                    // +32→−6, +49→−17.
+                    let runSpan = run.endY - run.startY
+                    let blobBottom = candidate.comp.minY + candidate.comp.height
+                    let stretchTriggerY = candidate.comp.minY
+                        + Int(Float(candidate.comp.height) * shortRunStretchBlobFraction)
+                    let shortRunStretch = run.endY < stretchTriggerY
+                    let placementFraction: Float = shortRunStretch
+                        ? shortRunStretchFraction
+                        : 0.30
+                    torsoDetY = run.startY + Int(Float(runSpan) * placementFraction)
+                    if shortRunStretch {
+                        slog(String(format:
+                            "[SHORT_RUN_STRETCH] frame=%d pickedIdx=%d runEndY=%d blobBottom=%d stretchTriggerY=%d detY=%d fraction=%.2f",
+                            frameIndex, q.idx, run.endY, blobBottom,
+                            stretchTriggerY, torsoDetY, placementFraction))
+                    }
                     if tryN > 0 {
                         slog(String(format:
                             "[EMPTY_STRIP_FALLBACK] frame=%d triedQualifiers=%d pickedIdx=%d detY=%d",
@@ -902,11 +972,34 @@ final class DetectionEngine {
         // detection row has no mask pixels at the gate — we'd be
         // interpolating off of nothing. Under the flag, reject; otherwise
         // log-only to measure frequency in current-behavior mode.
+        //
+        // §38 H-THICK-STRIP-CHECK (shipped 2026-04-15). If the single-col
+        // strip is zero at detRow, probe the full 9-col thick gate band
+        // (same band §34 uses for run extraction). If any column in
+        // x = gateColumn ± thickGateHalf has a mask pixel at detRow, the
+        // body is actually present at this row — just gapping at the exact
+        // gate column. Don't reject. Interpolation falls through to the
+        // default 0.5 fraction when stripWidth is 0.
         if stripWidth == 0 {
+            var thickStripHasMask = false
+            let tMin = max(0, gateColumn - thickGateHalf)
+            let tMax = min(W - 1, gateColumn + thickGateHalf)
+            var tx = tMin
+            while tx <= tMax {
+                if maskBuf[detRow * W + tx] != 0 {
+                    thickStripHasMask = true
+                    break
+                }
+                tx += 1
+            }
             if useLeadingEdgeTrigger {
-                slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 action=reject")
-                logReject("empty_strip", detail: "detY=\(torsoDetY)")
-                return nil
+                if thickStripHasMask {
+                    slog("[EMPTY_STRIP_THICK_PASS] frame=\(frameIndex) detY=\(torsoDetY) gateColStrip=0 thickBand=x\(tMin)..x\(tMax) hasMask=Y action=allow")
+                } else {
+                    slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 thickBand=empty action=reject")
+                    logReject("empty_strip", detail: "detY=\(torsoDetY) thick=empty")
+                    return nil
+                }
             } else {
                 slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 wouldRejectUnderFlag=true action=log_only")
             }
