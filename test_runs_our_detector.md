@@ -5720,3 +5720,79 @@ Proposed: switch detY from `(startY+endY)/2` to `startY + torsoFraction × picke
 
 Validate the L3 pick by hypothesis: if 30%-from-top had been used on idx 0 (72..122, len 51), detY would be 72 + 15 = 87. User wanted 150 — still wrong. For L3 the picker *must* advance past idx 0, so §30 alone doesn't fix L3. Needs a companion rule.
 
+---
+
+## Run 2026-04-15 Test QQ — 15 crossings, §30 + §31 shipped (front cam, sprint + hand swipes)
+
+### Session config
+
+`[ENGINE_CONFIG] picker=longestRun cam=front process=180x320 gate=col90±2 diffThresh=15 hFrac=0.55 wFrac=0.08 localSupport=0.25 fillStrict=0.20 aspStrict=1.2 fillLenient=0.12 aspLenient=1.7 torsoFrac=0.30 spikeRatio=1.5 warmup=10 cooldown=0.50s leadingEdge=ON torsoRunAbsMin=50 torsoRunAbsMax=55 torsoRunHeightFrac=0.25 gateRunMergeMaxGap=2 runPicker=torso_bias detY=0.30x_from_picked_top`
+
+All 15 crossings were running pace with hand swipes. L1–L3 small swipes, L4 bigger, L5/L7/L11/L12/L13 swipes that crossed behind the body. L15 ignored per user.
+
+### Per-crossing table
+
+| # | Frame | detY | userY | Δy | userX | dir | Part landed on | Verdict |
+|---|-------|------|-------|-----|-------|-----|----------------|---------|
+| 1 | 77 | 147 | 148 | +1 | 91 | L>R | torso | GOOD |
+| 2 | 174 | 128 | 136 | +8 | 99 | R>L | torso | GOOD |
+| 3 | 311 | 175 | 172 | -3 | 94 | L>R | torso | GOOD |
+| 4 | 439 | 180 | 176 | -4 | 93 | R>L | torso | GOOD |
+| 5 | 641 | 146 | 154 | +8 | 156 | R>L | torso Y / back-of-hand X | GOOD Y, BAD X (hand behind body → late fire) |
+| 6 | 771 | 197 | 151 | -46 | 97 | R>L | hip / lower torso | BAD — Δy too low |
+| 7 | 1122 | 168 | 167 | -1 | 88 | L>R | torso | GOOD |
+| 8 | 1205 | 179 | 176 | -3 | 100 | R>L | torso | GOOD |
+| 9 | 1280 | 140 | 144 | +4 | 78 | L>R | torso | GOOD (maybe 1 frame early) |
+| 10 | 1355 | 130 | 165 | +35 | 91 | L>R | upper chest / shoulder | BAD — anchor too high; arm ahead of body |
+| 11 | 1437 | 154 | 158 | +4 | 132 | L>R | torso Y / back-of-body X | GOOD Y, BAD X (big hand swipe) |
+| 12 | 1521 | 170 | 153 | -17 | 42 | L>R | low torso Y / back-of-body X | OK-Y, BAD X |
+| 13 | 1596 | 171 | 158 | -13 | 123 | R>L | low torso Y / back-of-body X | OK-Y, BAD X |
+| 14 | 1674 | 160 | 159 | -1 | 93 | L>R | torso | GOOD (slight arm) |
+| 15 | 1774 | 103 | — | — | — | L>R | — | ignored per user |
+
+### Score vs Test PP baseline
+
+- Σ|Δy| across 14 scorable laps (L15 excluded) = 148. Per-lap avg 10.6 px.
+- Test PP baseline: Σ|Δy| = 222 across 10 scorable laps = 22.2 px/lap.
+- **§30 + §31 cut per-lap Δy roughly in half.** Y-axis placement is now excellent on torso-only crossings.
+- 9 of 14 laps at |Δy| ≤ 4. 3 laps at 8–17. Only 2 laps > 20 (L6 −46, L10 +35).
+
+### §31 activity
+
+`headSnag=N` on every fire — the torso-bias reorder was never needed because no frame had multiple qualifiers where the topmost was < half the widest. §29 fallback also silent. Both safety nets dormant on this scenario; no help and no harm.
+
+### Remaining Y failures
+
+**L6 f771 — only lower-body qualifier available:**
+```
+merged=[…,122..161:40,165..166:2,179..242:64,246..269:24,…]
+qualifying=1 pickedIdx=6 pickedLen=64 detY=197
+```
+idx 4 (122..161, 40 px) is upper-torso, fails minReq=55. idx 6 (179..242, 64 px) is hip+thigh, qualifies. §30's 30%-from-top on idx 6 = 179+19=198, lands on hip. User wanted 151 (inside idx 4). **Same root cause as Test PP L6: the §27 absMax=55 cap drops a real torso-top run by 15 px.** §30 can't fix this; picker is forced to the only qualifier.
+
+**L10 f1355 — single qualifier sits high in body:**
+```
+merged=[…,114..168:55,…231..270:40,…]
+qualifying=1 pickedIdx=2 pickedLen=55 widths=[idx2:w38] detY=130
+```
+Only qualifier (idx 2) is 114..168. 30%-from-top → 130. User mark y=165 is one row below idx 2's bottom. Blob y=83..319, blobH=237; user mark at 165 sits ~34% down-blob. idx 2 is at 14–37% down-blob — so our anchor is correct for the picked run, but the picked run covers upper-chest/shoulder, not mid-chest. The mid-chest mass at the gate column is absent this frame.
+
+### Remaining X failures (NEW dominant mode)
+
+Laps 5, 11, 12, 13 all have a hand swipe passing behind the body as it crosses. userX is far off-center:
+
+| Lap | userX | blob x range | gate | dir | Interpretation |
+|-----|-------|--------------|------|-----|----------------|
+| 5 | 156 | 68..179 | 90 | R>L | body already through; arm trailing; user tapped the real torso at x=156 (far trailing edge of blob) |
+| 11 | 132 | 1..179 | 90 | L>R | same — body at x=132, gate still firing at x=90 |
+| 12 | 42 | 1..139 | 90 | L>R | body at x=42 (trailing side for L>R), gate firing at 90 — "on back of body" |
+| 13 | 123 | 21..174 | 90 | R>L | body at x=123 (leading for R>L means right side? user says "back of body") |
+
+User's verdict: "detects the back of the body instead of the front." Interpretation: on a big trailing hand swipe, the arm reaches the gate only *after* the body has passed — the arm forms a tall vertical run at the gate and §23 fires on the arm frame. The body has moved on by then, so our anchor (gate column 90) lies on the trailing/back side of the body silhouette.
+
+**Key property:** this is an X-axis failure, not Y. Y-placement on the fired frame is still roughly at torso height (L5/11: Δy ≤ 8; L12/13: Δy 13–17). PF's horizontal anchor IS ground truth here (reference memory) — L5/11/12/13 are a PF-parity-testable bug.
+
+### Next step — see detector_hypotheses.md §32
+
+§32 H-TRAILING-HAND-SWIPE-SUPPRESS: reject or defer fires where the gate-column vertical run is dominated by a narrow horizontal protrusion (trailing arm) rather than torso-width mass. L6 and L10 are deferred Y-tuning follow-ups (candidate §33).
+

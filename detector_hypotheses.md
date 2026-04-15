@@ -3966,14 +3966,184 @@ or add an anti-correlation check against `[TORSO_COLUMN]`).
 
 ### Status
 
-Shipped 2026-04-15 alongside §30. Build verified. Test QQ
-next — same 10-crossing protocol as Test PP, parallel PF.
-Expected:
-- L5, L8, L9, L11 detY shifts up into torso region (§30 win).
-- L2, L4 detY shifts up — may regress if the picked run is
-  already short.
-- L3 likely still on head (caveat above); if so, §31 follow-up.
-- Hand-swipe + arm-only scenarios should still reject cleanly.
+Shipped 2026-04-15 alongside §30. Build verified.
+
+### Test QQ verdict (2026-04-15)
+
+**§30 + §31 confirmed as large Y-axis win.** Σ|Δy| dropped
+from 22.2 px/lap (Test PP) to 10.6 px/lap (Test QQ, 14 laps).
+9 of 14 laps now within ±4 px. Both safety nets (§31 reorder,
+§29 EMPTY_STRIP fallback) were dormant across Test QQ
+(`headSnag=N` on every fire) — they neither helped nor harmed;
+Test QQ was a single-qualifier scenario throughout.
+
+Remaining Y outliers:
+- **L6 (Δy=−46).** Only lower-body qualifier (179..242:64)
+  passed minReq=55; the real upper-torso run (122..161:40) was
+  15 px below cap and got filtered. Root cause is §27's absMax
+  cap, not §30's placement. Candidate §33 follow-up.
+- **L10 (Δy=+35).** Only qualifier (114..168:55) sat high in
+  the body; the body's true mid-chest mass at the gate column
+  was missing on this frame. 30%-from-top inside the picked
+  run is correct *for the picked run*, but the run itself is
+  above mid-chest. No placement rule fixes this without a
+  second qualifier to compare against.
+
+New dominant failure mode is horizontal (§32 below), not
+vertical. §30 + §31 stay shipped; no further Y-tuning this
+session.
+
+---
+
+## §32 H-TRAILING-HAND-SWIPE-SUPPRESS (2026-04-15)
+
+### Observation
+
+Test QQ laps 5, 11, 12, 13 all had a hand swung through the
+gate *behind* the body (trailing arm as the runner moves
+through). The user marks land far from the gate column:
+
+| Lap | userX | gate | dir | blob x | body-side of gate |
+|-----|------:|-----:|:---:|:-------|:------------------|
+| 5 | 156 | 90 | R>L | 68..179 | torso already past; arm at gate |
+| 11 | 132 | 90 | L>R | 1..179 | torso ahead of gate; arm at gate |
+| 12 | 42 | 90 | L>R | 1..139 | torso trailing; arm already past |
+| 13 | 123 | 90 | R>L | 21..174 | torso past; arm at gate |
+
+User verdict: "detects the back of the body instead of the
+front." Mechanism: the body's fastest silhouette flash at the
+gate column is too brief to hit the merge+qualifier bar on its
+own; one frame later the trailing arm plus residual body
+forms a tall vertical run at gate col that qualifies. §23
+fires on the arm frame, so the anchor (gate col 90) sits on
+the trailing/back side of the actual body.
+
+**This is an X-axis bug** and therefore PF-parity testable —
+Photo Finish's output *does* expose horizontal anchor, so we
+can validate against PF without waiting on `USER_MARK`.
+
+### Signals available at fire frame
+
+From L5 f641 (blob=112x220 x=68..179, detY=146):
+
+```
+merged=[123..201:79,284..284:1,288..319:32]
+qualifying=1 widths=[idx0:w24] headSnag=N pickedIdx=0 pickedLen=79 detY=146
+```
+
+- `widths[idx0]=24` — at the picked run's centerY, the
+  horizontal strip spanning the gate is 24 px wide. Not narrow
+  (the arm+trunk are merged) — width alone won't distinguish.
+- `[CENTROID_X]`, `[GATE_WINDOW_FILL]`, and the per-column
+  `[DETECT_DIAG]` profile all expose horizontal mass
+  distribution. On a trailing-arm fire we'd expect centroidX
+  to be well off-center from the gate.
+
+From L11 f1437 (blob=175x249 x=1..179, detY=154):
+
+```
+merged=[…,133..203:71,210..260:51,…]
+qualifying=1 pickedIdx=1 pickedLen=71 widths=[idx1:w14] detY=154
+```
+
+`widths[idx1]=14` — at centerY 168 the strip is only 14 px
+wide. A real mid-chest strip on a blob 179 px wide would be
+much larger. The narrowness is the signal that the gate column
+is sitting on an arm, not the torso.
+
+### Candidate rule
+
+At fire time, compute the blob's centroidX or the gate-window
+horizontal centre-of-mass at the picked run's centerY. If the
+blob's x-mass is concentrated > threshold px away from the
+gate column on the leading-edge side (i.e. the torso has
+already passed), suppress the fire or defer to a prior
+candidate frame where the torso was at the gate.
+
+Option A — **suppress-and-retry with frame lookback:** keep a
+short ring of the last N frames' gate-crossing candidates; if
+the current fire's centroidX is > K px off-gate in the
+trailing direction, pick the earliest prior frame whose
+centroid was within K px of gate. Complex; risks over-suppress
+on genuinely asymmetric crossings.
+
+Option B — **width-based suppress:** if `picked_width` at
+centerY < some fraction of blob width (e.g. strip width <
+20% of blob bbox width), reject the fire and wait one more
+frame. Simpler; risks false-reject on narrow runners.
+
+Option C — **centroid guard:** compute centroidX at the
+picked run's centerY and require
+`|centroidX − gateColumn| ≤ torsoHalfWidth`. If violated,
+suppress and retry next frame. Middle complexity.
+
+### L5 pre-check under each option
+
+- L5 widths=[idx0:w24], blob W=112 → strip/blob = 21.4%.
+  Option B (threshold 20%) would NOT fire (but just barely).
+- L11 widths=[idx1:w14], blob W=175 → 8%. Option B fires
+  suppress.
+- L12 widths=[idx2:w10], blob W=179 → 5.6%. Option B suppresses.
+- L13 widths=[idx3:w14], blob W=154 → 9.1%. Option B suppresses.
+- All good Ys with GOOD X: e.g. L8 w=18/140=12.9%. Would also
+  suppress — **false-reject**. Option B kills real crossings.
+
+Width alone is a noisy signal because real torso mass isn't
+always wide at the gate column (angle, clothing, motion blur).
+Option B is probably wrong by itself. Option C (centroid vs
+gate) is the stronger candidate.
+
+### Behavioral-requirements check (Option C, centroid guard)
+
+1. **Torso crossings:** fires normally when centroid is near
+   gate. Trailing-arm false fires get 1-frame defer.
+2. **Hand swipes (arm-only from off-screen):** single short
+   run still rejected by §23 qualifier. Unaffected.
+3. **Leg-only:** leg swing at gate has low mass to one side;
+   centroid likely off-gate. Would suppress — aligns with
+   existing goal of rejecting leg-only.
+4. **Lighting:** unaffected.
+5. **Fast/slow:** fast sprints may genuinely have asymmetric
+   silhouette at gate (leading leg, trailing arm). Risk of
+   false-reject. Threshold must be tuned against Test QQ's
+   L1–L4 GOOD laps to make sure they still fire.
+6. **Forward lean:** centroid and gate should still align when
+   the torso is actually at the gate.
+7. **Front/rear cam:** unaffected.
+8. **Double-fire:** cooldown handles retry.
+9. **Environmental motion:** unaffected.
+
+### Status
+
+**Proposed, not shipped.** Rule and threshold not yet chosen.
+Need one more dataset with PF parallel to quantify:
+  - distribution of `centroidX − gateColumn` on GOOD torso
+    fires (L1–L4, L7, L8, L9, L14 from Test QQ);
+  - same metric on BAD trailing-arm fires (L5, L11, L12, L13);
+  - whether a single threshold separates them.
+
+### Next test (Test RR)
+
+Same 10–15 crossing protocol with parallel PF. User
+deliberately does mix of:
+  - 4× clean crossings (arms close to body);
+  - 4× big hand swipes that swing *behind* the body as it
+    crosses (the L11/L12/L13 scenario);
+  - 2× big hand swipes that lead *in front of* the body (the
+    L10 scenario).
+
+Request from user:
+  - for each crossing, PF's horizontal anchor pixel (so we can
+    validate X, which PF exposes);
+  - on-screen USER_MARK tap on the real torso center (as
+    before).
+
+Expected data: we get `centroidX` + `gateColumn` from logs for
+each frame, paired with PF's X anchor. That gives us the
+correct anchor per crossing and lets us back-solve whether
+Option C's centroid guard separates GOOD from BAD.
+
+No code change until Test RR confirms the separation.
 
 ---
 
