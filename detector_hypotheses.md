@@ -3818,23 +3818,77 @@ but regresses 3/10 — net marginal. Clamped-blob-fraction
 improves 4/10 but regresses 2/10 harder. **No single placement
 rule wins Test PP outright.**
 
-### Next test needed before shipping
+### PF-parity note (2026-04-15)
 
-We need evidence of *where PF anchors detY on the same frames*
-before changing the placement rule. Test PP had parallel PF —
-user, please paste the PF crossing screenshots for laps 5, 8, 9
-(the three clean "too low" cases where our midpoint = 181, 176,
-191 and user-marked = 139, 157, 151). Two questions:
+User confirmed: **Photo Finish's output shows horizontal anchor
+and fire timing only — it does NOT show vertical placement.**
+PF cannot serve as ground truth for detY. The only vertical
+ground truth we have is `[USER_MARK]` taps.
 
-1. Does PF anchor within the picked merged run, above it (in the
-   head/shoulder area), or at a height that corresponds to the
-   full blob bbox regardless of the picked run?
-2. On L3 (our detY=97 landed on head, user wants 150): where does
-   PF anchor on the same crossing? If PF also lands high, this is
-   a two-runner / timing framing issue and L3 is not a detector
-   failure.
+Phase-1 "match PF" still applies to horizontal anchor, fire
+timing, and fire/no-fire decisions. It does **not** apply to
+detY. For detY placement tuning we optimize directly against
+userY marks and future on-tap data.
 
-Detector-logic change held until this data comes in.
+### Revised Test PP scoring (userY as truth)
+
+Sum of |Δy| across the 9 scorable laps (L1 excluded):
+
+| Rule | L2 | L3 | L4 | L5 | L6 | L7 | L8 | L9 | L10 | L11 | Σ|Δy| |
+|------|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| current midpoint (shipped) | 9 | 53 | 2 | 24 | 26 | 3 | 42 | 19 | 4 | 40 | **222** |
+| 30%-from-top-of-picked | 34 | 63 | 21 | 1 | 15 | 6 | 27 | 3 | 7 | 21 | **198** |
+| blob-30% clamped to picked | 69 | 53 | 49 | 8 | 1 | 20 | 5 | 21 | 23 | 4 | **253** |
+| hybrid: 30% if pickedLen>70 else mid | 34 | 53 | 21 | 1 | 26 | 3 | 27 | 3 | 4 | 21 | **193** |
+
+**30%-from-top-of-picked** drops total by 24 px (10%). Biggest
+wins L5 −23, L8 −15, L9 −16, L11 −19. Biggest regression L2 +25.
+
+**Hybrid (30% if pickedLen > 70 else midpoint)** drops total by
+29 px and preserves L2/L7/L10 (short runs near torso-height)
+while still fixing the long-merged-span cases. L3 still wrong
+regardless — that is a picker bug, not a placement bug, and
+contributes 53 of the remaining 193 px on its own.
+
+### Options
+
+**A — ship 30%-from-top-of-picked for every fire.** Simplest
+diff. Σ|Δy| 222 → 198.
+
+**B — ship hybrid: 30% if pickedLen > 70 else midpoint.**
+Threshold value is an arbitrary knob until more data. Σ|Δy|
+222 → 193.
+
+**C — leave placement alone, fix the picker (L3 alone is
++53 px).** Change the qualifying-run selection to prefer the
+qualifier whose midpoint is nearest `blobTop + 0.30 × blobH`,
+breaking ties by topmost. Dry run on L3 f518:
+
+- Candidates: idx 0 mid=97 vs blob-target = 70+0.30×194 = 128.
+  Distance 31.
+- idx 2 mid=172. Distance 44.
+- Topmost tie-break doesn't engage — idx 0 wins by proximity.
+
+So nearest-to-blob-30% would *still* pick idx 0 on L3. Picker
+rule needs a different discriminator — perhaps "qualifier
+closest to the largest horizontal run below the head", which
+is exactly H-TORSO-COLUMN territory (already logged in
+`[TORSO_COLUMN]` but not used for the pick decision). Parking
+C for a follow-up.
+
+**D — collect one more test with current shipped §29 code**
+on a different scenario (lean, two-runner, or front-cam walk)
+to confirm the long-merged-run placement pattern before
+changing anything.
+
+### Status
+
+Proposed. Awaiting user choice among A / B / C / D. Code
+change held. My default recommendation if the user says "your
+call": **Option B** — smallest regression, largest improvement,
+threshold documented as tunable.
+
+---
 
 ---
 
