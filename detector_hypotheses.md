@@ -3741,3 +3741,100 @@ anchor on torso (or reject if no torso-sized run exists at gate
 on fire frame); laps 2–5, 9–10 unchanged.
 
 ---
+
+## §30 H-DETY-FRACTION-INSIDE-PICKED-RUN (2026-04-15)
+
+Test PP evidence: on 4 of 10 crossings (L5, L8, L9, L11), detY
+landed 19–42 px below the user-marked torso. In every case, the
+picked merged run was long (76–118 px) and the midpoint of that
+run fell on hip/thigh rather than mid-chest. Separately, L3 showed
+topmost picked a head-only qualifier when a torso-sized qualifier
+existed below — a picker problem, not a placement problem.
+
+### Proposal (placement only, not picker)
+
+Change `torsoDetY = (picked.startY + picked.endY) / 2` to
+`torsoDetY = picked.startY + Int(torsoFraction × pickedLen)`
+where `torsoFraction = 0.30` (matches the existing blob-fraction
+constant).
+
+Effect per Test PP frame:
+
+| Lap | picked startY..endY | len | mid | 30%-from-top | user |
+|----:|---------------------|----:|----:|-------------:|-----:|
+|  2 | 65..189 | 125 | 127 | 102 | 136 (Δ mid +9, 30% −34 ✗) |
+|  4 | 98..193 | 96 | 145 | 126 | 147 (mid better ✓) |
+|  5 | 109..226 | 118 | 167 | 144 | 143 (30% wins Δ+1) |
+|  6 | 165..220 | 56 | 192 | 181 | 166 (both low, mid worse) |
+|  7 | 107..156 | 50 | 131 | 122 | 128 (mid better) |
+|  8 | 144..219 | 76 | 181 | 166 | 139 (both low, 30% closer) |
+|  9 | 136..216 | 81 | 176 | 160 | 157 (30% wins Δ+3) |
+| 10 | 132..186 | 55 | 159 | 148 | 155 (mid better Δ-4) |
+| 11 | 142..241 | 100 | 191 | 172 | 151 (both low, 30% closer) |
+
+Net: **30% placement helps L5, L8, L9, L11 but regresses L2, L7,
+L10 and doesn't fully fix L6.** Simple fraction swap alone is not
+unambiguously better.
+
+### Revised proposal — blob-30% *clipped* to picked run
+
+Use `detY = clamp(blobTop + 0.30 × blobH, picked.startY, picked.endY)`.
+The picked run constrains where we place (can't land outside the
+actually-firing vertical extent); the blob-fraction supplies the
+torso-height anchor.
+
+| Lap | blobTop+0.30×blobH | picked range | clamped | user | Δy |
+|----:|-------------------:|:-------------|--------:|-----:|---:|
+|  2 | 67 | 65..189 | 67 | 136 | −69 ✗ |
+|  4 | 81 | 98..193 | 98 | 147 | −49 ✗ |
+|  5 | 135 | 109..226 | 135 | 143 | −8 ✓ |
+|  6 | 140 | 165..220 | 165 | 166 | −1 ✓ |
+|  7 | 108 | 107..156 | 108 | 128 | −20 |
+|  8 | 127 | 144..219 | 144 | 139 | +5 ✓ |
+|  9 | 111 | 136..216 | 136 | 157 | −21 |
+| 10 | 121 | 132..186 | 132 | 155 | −23 |
+| 11 | 147 | 142..241 | 147 | 151 | −4 ✓ |
+
+Blob-fraction-clamped is great for L5, L6, L8, L11 (all the "too
+low" cases) but terrible for L2 and L4 (overshoots top of blob
+because blob extends high above gate). Problem is that on
+close-up crossings, the blob bbox ≠ the detection run.
+
+### Root cause summary
+
+Two distinct bugs under one symptom ("fires low on sprint laps"):
+1. **Picker bug (L3):** with multiple qualifying merged runs,
+   topmost picks the head fragment. Longest picks the torso.
+   Neither is universally correct — we need a rule that picks
+   the torso specifically.
+2. **Placement bug (L5, L8, L9):** when one qualifier spans a
+   tall merged region, the midpoint anchors on hip. Fraction
+   placement fixes these but not at a single global value.
+
+### Status
+
+Proposed, not shipped. §30 placement change alone improves 4/10
+but regresses 3/10 — net marginal. Clamped-blob-fraction
+improves 4/10 but regresses 2/10 harder. **No single placement
+rule wins Test PP outright.**
+
+### Next test needed before shipping
+
+We need evidence of *where PF anchors detY on the same frames*
+before changing the placement rule. Test PP had parallel PF —
+user, please paste the PF crossing screenshots for laps 5, 8, 9
+(the three clean "too low" cases where our midpoint = 181, 176,
+191 and user-marked = 139, 157, 151). Two questions:
+
+1. Does PF anchor within the picked merged run, above it (in the
+   head/shoulder area), or at a height that corresponds to the
+   full blob bbox regardless of the picked run?
+2. On L3 (our detY=97 landed on head, user wants 150): where does
+   PF anchor on the same crossing? If PF also lands high, this is
+   a two-runner / timing framing issue and L3 is not a detector
+   failure.
+
+Detector-logic change held until this data comes in.
+
+---
+

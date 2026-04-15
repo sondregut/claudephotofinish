@@ -5606,3 +5606,117 @@ fallback: if the picked merged run's horizontal strip is empty at
 detY, advance to the next qualifying merged run below and retry.
 This addresses Test NN f401 (the original reason §28 was
 proposed) without the Test OO regression.
+
+---
+
+## Run 2026-04-14 Test PP — 11 crossings, parallel PF, §29 shipped (front cam)
+
+### Session config
+
+`[ENGINE_CONFIG] picker=longestRun cam=front process=180x320 gate=col90±2 diffThresh=15 hFrac=0.55 wFrac=0.08 localSupport=0.25 fillStrict=0.20 aspStrict=1.2 fillLenient=0.12 aspLenient=1.7 torsoFrac=0.30 spikeRatio=1.5 warmup=10 cooldown=0.50s leadingEdge=ON torsoRunAbsMin=50 torsoRunAbsMax=55 torsoRunHeightFrac=0.25 gateRunMergeMaxGap=2 runPicker=topmost_with_fallback`
+
+Lap 1 skipped per user instruction.
+
+### Per-crossing table
+
+| # | Frame | detY | userY | Δy | Part landed on | Verdict |
+|---|-------|------|-------|-----|----------------|---------|
+| 2 | 427 | 127 | 136 | +9 | torso | GOOD |
+| 3 | 518 | 97 | 150 | +53 | head | BAD — too high, too far back |
+| 4 | 596 | 145 | 147 | +2 | torso | GOOD |
+| 5 | 694 | 167 | 143 | -24 | back of body | BAD — fires behind torso |
+| 6 | 768 | 192 | 166 | -26 | low torso / hip | OK but ~1 frame late |
+| 7 | 856 | 131 | 128 | -3 | torso | fires too early (limb swing) |
+| 8 | 930 | 181 | 139 | -42 | hip / thigh | BAD — too low |
+| 9 | 1010 | 176 | 157 | -19 | low-torso | slightly too low |
+| 10 | 1086 | 159 | 155 | -4 | torso | GOOD (walking) |
+| 11 | 1159 | 191 | 151 | -40 | hip / thigh | GOOD per user (walking) but detY 40 px low |
+
+Score: GOOD 4 (L2, L4, L10, L11-by-verdict), OK-but-late 1 (L6), close-enough 1 (L7), BAD 4 (L3, L5, L8, L9).
+
+### §29 fallback log observation
+
+**No `[EMPTY_STRIP_FALLBACK]` or `[EMPTY_STRIP_PROBE]` lines fired on any of the 11 crossings.** The EMPTY_STRIP rescue path from §29 was not exercised — every first-topmost qualifier had a non-empty strip at its centerY. So §29's strip fallback is dormant in this test; the regressions come from another mechanism.
+
+### Mechanism evidence frame-by-frame
+
+**L3 f518 — topmost picked head, torso was a separate qualifier below:**
+```
+merged=[72..122:51,130..141:12,145..199:55,205..221:17,...]
+qualifying=2 pickedIdx=0 pickedLen=51 detY=97
+```
+Two qualifiers: idx 0 (72..122, len 51) = head/upper-shoulder, idx 2 (145..199, len 55) = torso. Topmost picker took idx 0. User-marked y=150 is the midpoint of idx 2. Longest picker would have correctly taken idx 2. **Topmost and longest diverge, user wants longest here.**
+
+**L5 f694 — single gap-fused whole-body run, midpoint is wrong:**
+```
+merged=[65..95:31,109..226:118,230..230:1,303..319:17]
+qualifying=1 pickedIdx=1 pickedLen=118 detY=167
+```
+One qualifier spans y=109..226 (118 px, head through waist). Midpoint = 167, user-marked torso = 143. Raw runs `65..95:31,109..213:105,216..217:2,219..219:1,222..226:5` — the 105-px raw run is already contiguous, not a gap-merge artifact. Tightening gap won't help. Blob-top is y=56, blob-30% = 56+0.3×264 = 135 — much closer to user's 143.
+
+**L6 f768 — torso-at-gate too short, only lower-torso qualified:**
+```
+merged=[69..88:20,94..98:5,105..110:6,116..160:45,165..220:56,232..237:6,...]
+qualifying=1 pickedIdx=4 pickedLen=56 detY=192
+```
+idx 3 = 116..160 (45 px) is the upper-torso run but 45 < minReq 55, rejected. idx 4 = 165..220 (56 px) = lower torso / hip clears by 1 px, picked. detY=192 is the midpoint of idx 4. User wanted 166 = top of idx 4 or bottom of idx 3. **§27 cap of 55 is one px too strict for this frame.**
+
+**L7 f856 — close fire, fine:**
+```
+merged=[56..75:20,86..96:11,107..156:50,...]
+qualifying=1 pickedIdx=2 pickedLen=50 detY=131
+```
+idx 2 is the 107..156 upper-torso run. detY=131 matches userY=128 (Δy=-3). User's "fires too early" is a timing complaint on an extreme-limb lap, not a placement bug.
+
+**L8 f930 — torso run fell below cap, lower-body merged run picked:**
+```
+merged=[67..86:20,100..100:1,107..138:32,144..219:76,224..225:2,...]
+qualifying=1 pickedIdx=3 pickedLen=76 detY=181
+```
+idx 2 = 107..138 (32 px) is the upper-torso. idx 3 = 144..219 (76 px) is hip+thigh merged (raw `148..183:36, 185..186:2, 188..190:3, 192..193:2, 196..196:1, 198..198:1, 200..203:4, 206..215:10, 217..219:3` — tightly clustered stride runs with gaps ≤ 2). Topmost picker correctly preferred idx 3 over idx 2 only because idx 2 failed the 55 cap. Midpoint of idx 3 = 181, user wanted 139. blob-top + 0.3×208 = 65+62 = 127 — much closer.
+
+**L9 f1010 — head/shoulder too short, long mid-body merged picked, midpoint is too low:**
+```
+merged=[58..63:6,86..107:22,113..126:14,136..216:81,220..236:17,...]
+qualifying=1 pickedIdx=3 pickedLen=81 detY=176
+```
+idx 3 = 136..216 is a 81 px merged run (torso + hip). Midpoint 176, user wanted 157. blob-top + 30% = 55+56 = 111 — overshoots the other way. Top of picked run + 30% of its length = 136+24 = 160 — matches user (Δy +3).
+
+**L11 f1159 — walking, same midpoint-too-low pattern:**
+```
+merged=[142..241:100,247..271:25,280..288:9,300..307:8]
+qualifying=1 pickedIdx=0 pickedLen=100 detY=191
+```
+Midpoint of 100 px run = 191. Top of run + 30% = 142+30 = 172 — still 21 px low vs user's 151. User called this "good" because on a walking lap the torso is vertically extended; Δy 40 is acceptable here even though it lands on the hip.
+
+### Repeating pattern across bad fires
+
+L3 topmost-picked-wrong (Δy +53) and L5/L8/L9/L11 midpoint-too-low (Δy −24..−42) are two different failure modes:
+
+1. **Topmost-picks-head-when-torso-is-lower (L3):** when multiple merged qualifiers exist, topmost is wrong. A head-or-upper-shoulder fragment qualifies before the torso run. §28 longest would have fixed this one.
+2. **Midpoint-inside-long-merged-run (L5, L8, L9, L11):** when only one merged qualifier exists but it spans a tall vertical chunk (100–118 px, torso+hip), the run midpoint lands on hip/thigh, not torso. Taking `run.startY + 0.3 × pickedLen` instead of the midpoint would anchor on mid-chest.
+
+Neither failure needs longest-vs-topmost — both are fixed by **using a 30%-from-top placement *within the picked run* instead of the run midpoint**, combined with **picking the topmost qualifier whose 30%-from-top-of-run lands inside the picker's acceptable Y range.**
+
+### §27 validation continues
+
+No false-reject rejections of real approach frames. minReq behavior:
+- L2 blobH=223 → minReq=55 (cap).
+- L3 blobH=194 → minReq=50 (absMin).
+- L4 blobH=271 → minReq=55 (cap).
+- L5 blobH=264 → minReq=55 (cap).
+- L6 blobH=257 → minReq=55 (cap).
+- L7 blobH=176 → minReq=50 (absMin) — below cap, no effect.
+- L8 blobH=208 → minReq=52.
+- L9 blobH=185 → minReq=50.
+- L10 blobH=186 → minReq=50.
+- L11 blobH=248 → minReq=55 (cap).
+
+No minReq > 55 anywhere — §27 cap is active as designed.
+
+### Next step — see detector_hypotheses.md §30
+
+Proposed: switch detY from `(startY+endY)/2` to `startY + torsoFraction × pickedLen` *within the picked merged run*. This is a placement change, not a picker change. §29 stays (topmost-with-fallback picker is still correct; we just pull detY up inside the picked run to mid-chest).
+
+Validate the L3 pick by hypothesis: if 30%-from-top had been used on idx 0 (72..122, len 51), detY would be 72 + 15 = 87. User wanted 150 — still wrong. For L3 the picker *must* advance past idx 0, so §30 alone doesn't fix L3. Needs a companion rule.
+
