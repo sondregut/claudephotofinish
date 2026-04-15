@@ -257,7 +257,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d temporalWait=upperHalf",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, thickGateHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -692,9 +692,35 @@ final class DetectionEngine {
             let minRequired = max(torsoRunAbsMin,
                                   min(torsoRunAbsMax,
                                       Int(Float(blobH) * torsoRunHeightFrac)))
-            let qualifyingIndices = frameGateRunsMerged.indices.filter {
+            let rawQualifyingIndices = frameGateRunsMerged.indices.filter {
                 (frameGateRunsMerged[$0].endY - frameGateRunsMerged[$0].startY + 1) >= minRequired
             }
+
+            // §35 H-TEMPORAL-WAIT (shipped 2026-04-15). Drop qualifier runs
+            // whose startY sits in the lower half of the blob bbox — those
+            // are legs/hips, not torso. PF-parity data from Test TT
+            // (L2/3/9/10/11) showed PF waits additional frames rather than
+            // firing on a leg-region qualifier, then fires on a later frame
+            // where the torso is at the gate. This pre-filter drops the
+            // leg clusters before §31 torso-bias runs, so if a torso-zone
+            // qualifier exists we pick it; if none exists we suppress the
+            // fire and wait for a better frame.
+            let blobMidY = candidate.comp.minY + candidate.comp.height / 2
+            let qualifyingIndices = rawQualifyingIndices.filter {
+                frameGateRunsMerged[$0].startY < blobMidY
+            }
+            let limbSuppressed = !rawQualifyingIndices.isEmpty
+                                 && qualifyingIndices.isEmpty
+            if limbSuppressed {
+                let lowestStartY = rawQualifyingIndices
+                    .map { frameGateRunsMerged[$0].startY }
+                    .min() ?? -1
+                slog(String(format:
+                    "[LIMB_WAIT] frame=%d blobMidY=%d rawQualifiers=%d allLowerHalf=Y lowestStartY=%d",
+                    frameIndex, blobMidY, rawQualifyingIndices.count,
+                    lowestStartY))
+            }
+
             let runsDesc = frameGateRuns
                 .map { "\($0.startY)..\($0.endY):\($0.endY - $0.startY + 1)" }
                 .joined(separator: ",")

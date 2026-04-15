@@ -4271,3 +4271,127 @@ confirmation step.
 
 ---
 
+## §35 H-TEMPORAL-WAIT (2026-04-15)
+
+### Observation
+
+Test TT (outdoor backlit, §34 band=9 shipped) regressed to
+Σ|Δy|=69 px/lap vs Test SS's 49 px/lap on the same scene.
+User's parallel-PF verdicts on L2/L3/L9/L10/L11 consistently
+reported PF waited additional frames and fired on the torso,
+while our detector fired on the knee/leg at an earlier frame.
+
+Frame-level analysis of those laps:
+
+| # | blobMidY | Qualifiers (startY:len) | What we fired on |
+|---|---------:|-------------------------|:-----------------|
+| 2 | 198 | idx11 startY=231 len=59 | knee (Δy −87) |
+| 3 | 203 | idx15 startY=214 len=106 | knee (Δy −88) |
+| 9 | 208 | idx10 startY=217 len=103 | quad (Δy −88) |
+| 10 | 206 | idx9 startY=219 len=101 | knee (Δy −85) |
+| 11 | 206 | idx5 startY=70 / idx8 startY=231 | §31 picked legs (Δy −87) |
+
+L2/3/9/10 had a *single* qualifier and it was entirely below
+`blobMidY` — no torso qualifier existed on the fire frame, so
+§23+§31 fired on the only available run (legs). L11 had two
+qualifiers; the upper-body run (70..155, 86 px) was present
+but §31 torso-bias reordered to the wider leg cluster
+(idx8 w=20 vs idx5 w=4), because legs with two feet extended
+produce a wider horizontal strip than a narrow upper chest.
+
+PF parity: PF waited for a later frame where the torso was
+at the gate, then fired on torso. Our detector lacked that
+"wait" behavior.
+
+### Rule
+
+Before §31 torso-bias picker runs, pre-filter the qualifying
+merged runs to those whose `startY < blobMidY` (where
+`blobMidY = blob.minY + blob.height/2`). Runs starting in the
+lower half of the blob bbox are legs/hips and get dropped.
+If the filter leaves the qualifier set empty, the frame
+produces no fire; we log `[LIMB_WAIT]` and advance to the
+next frame. Next-frame re-evaluation is natural — no state
+machine.
+
+This is a *pre-picker filter*, not a post-picker check. That
+matters: on L11 the post-picker check would have blocked the
+fire entirely because §31 chose the leg cluster, but the
+pre-filter drops the leg qualifier first and lets §31 see
+only the upper-body qualifier, which fires correctly.
+
+### Log format
+
+- `[LIMB_WAIT] frame=N blobMidY=M rawQualifiers=K
+  allLowerHalf=Y lowestStartY=S` emitted whenever at least
+  one qualifier existed but none had `startY < blobMidY`.
+- `[GATE_RUNS]` `qualifying=` count now reflects post-filter
+  count (legs-only frames log `qualifying=0 fire=N`).
+
+### Test TT dry-run
+
+Applied to TT's 12 crossings, §35 (interpretation b) blocks
+L2, L3, L9, L10 at the fire frame (wait for next frame) and
+redirects L11 from legs to upper-body qualifier. Best-case
+Σ|Δy| estimate: 69 → ~25 px/lap (~65% reduction) assuming
+the next frame in each waited sequence fires on torso with
+small Δy. This is speculative — requires Test UU to confirm.
+
+### What §35 does NOT address
+
+- **L4 head-snag (Δy +82).** Upper-half qualifier exists
+  (74..133) but it's the head, not the torso. No
+  torso-centerY qualifier is present in the mask on that
+  frame. §35 fires on head. Separate picker problem; not a
+  temporal problem.
+- **L5 (Δy −69).** Borderline case: pickedRun startY=206,
+  blobMidY=207, passes the filter by 1 px. Still fires low.
+
+### Missed-crossing risk
+
+If a crossing's entire lifetime produces only lower-half
+qualifiers (fragmented torso mask, coherent leg mass), §35
+silently suppresses every frame → missed crossing. The
+`[LIMB_WAIT]` log lets us detect this after the fact
+(many LIMB_WAIT lines with no subsequent CROSSING). If it
+happens we add a fallback (allow lower-half fire after N
+consecutive waits). Not shipped yet — watch for it in
+Test UU data.
+
+### Behavioral-requirements check
+
+1. Torso crossings (indoor QQ-class): torso qualifier
+   always starts in upper half. Unaffected.
+2. Hand swipes: already rejected by length floor.
+   Unaffected.
+3. Leg-only motion: §35 strictly improves rejection.
+4. Lighting: §35 is lighting-agnostic; benefits
+   bright-outdoor parity.
+5. Fast/slow: risk of missed sprint crossings if torso
+   mask never qualifies. Watch `[LIMB_WAIT]` counts.
+6. Forward lean: TT L7/L8 had upper-half qualifiers
+   (startY 122, 140). Fires normally.
+7. Front/rear cam: unaffected.
+8. Double-fire: cooldown + gate-clear guard unchanged.
+9. Environmental motion: unaffected.
+
+### Status
+
+Shipped 2026-04-15. One-location edit in `DetectionEngine.swift`
+§23 picker block: `rawQualifyingIndices` collects all ≥
+minRequired runs, then the §35 filter drops lower-half ones
+into `qualifyingIndices`. ENGINE_CONFIG adds
+`temporalWait=upperHalf`.
+
+Note: Gemini's companion proposal §30v2 ("Run-Anchored detY
+= pickedRun.startY + length × 0.30") is the formula already
+shipped as §30 — no code change on that front. Gemini's
+§30v2 entry is a no-op relative to current main.
+
+Note: Test UU "controlled PF-probe scenarios" plan was
+bypassed per user directive in favor of directly shipping
+§35. Test UU effectively becomes "re-run the TT protocol
+with §35 active."
+
+---
+
