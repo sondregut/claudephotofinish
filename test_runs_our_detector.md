@@ -5996,3 +5996,478 @@ Test TT next:
 - Parallel PF on every crossing — needed to confirm which
   fires are parity-valid vs parity-failures (L3 style).
 
+## Run 2026-04-15 Test XX — outdoor mixed (sprints, leans, dips) with parallel PF
+
+### Context
+
+First test run after shipping §37 LIMB_WAIT_RELEASE, §38 thick
+9-col EMPTY_STRIP check, and §40 short-run stretch (0.70
+placement when picked run ends in upper 60% of blob).
+
+Also first test with `maxExposureCapMs = nil` (PF paper §4.4
+compliance — no auto-exposure cap, down to 0.5 ms allowed).
+
+Scenario: outdoor, parallel Photo Finish capture on second
+phone. User ran back-and-forth 25 times. PF recorded 25
+crossings, we recorded 19.
+
+### Our 19 [CROSSING] timestamps
+
+6.674, 11.788, 15.615, 19.477, 24.282, 32.871, 36.614,
+44.782, 49.016, 55.476, 59.452, 63.102, 66.953, 70.514,
+74.175, 82.362, 96.937, 100.163, 106.064
+
+### PF 24 published timestamps
+
+5.17, 8.92, 12.79, 17.65, 21.38, 26.11, 30.04, 34.31, 38.15,
+42.26, 48.82, 52.74, 56.41, 60.31, 63.86, 67.51, 70.93,
+75.53, 79.15, 83.17, 90.29, 93.52, 96.57, 99.44
+
+(user said total 25; PF list shows 24 — one un-pasted or a
+miscount. Either way the analysis works from structural
+alignment.)
+
+### Clock alignment
+
+Offset our-clock − PF-clock ≈ +6.65 s, stable across the
+whole run except for a +3 s drift on our #17 (fired late due
+to lean — see below).
+
+### Lap-by-lap mapping
+
+| Our # | Our time | PF # | PF time | Status | User scenario |
+|---|---|---|---|---|---|
+| 1 | 6.674 | — | — | our-only / PF missed | regular walk, hands side |
+| 2 | 11.788 | 1 | 5.17 | captured | regular run |
+| 3 | 15.615 | 2 | 8.92 | captured | regular run |
+| 4 | 19.477 | 3 | 12.79 | captured | mid-body, should've been earlier on chest |
+| 5 | 24.282 | 4 | 17.65 | captured | regular |
+| — | — | 5 | **21.38** | **MISSED** | regular run |
+| 6 | 32.871 | 6 | 26.11 | captured, late | low in frame, arm+leg out |
+| 7 | 36.614 | 7 | 30.04 | captured | arms-by-side, big leg steps (slow) |
+| — | — | 8 | **34.31** | **MISSED** | arms-by-side, big leg steps (slow) |
+| 8 | 44.782 | 9 | 38.15 | captured | big fwd step, shorter body |
+| 9 | 49.016 | 10 | 42.26 | captured | regular |
+| 10 | 55.476 | 11 | 48.82 | captured | PF fired on hand; real crossing between our and PF marks |
+| 11 | 59.452 | 12 | 52.74 | captured | good |
+| 12 | 63.102 | 13 | 56.41 | captured | good |
+| 13 | 66.953 | 14 | 60.31 | captured | good |
+| 14 | 70.514 | 15 | 63.86 | captured | good |
+| 15 | 74.175 | 16 | 67.51 | captured | lean across line |
+| — | — | 17 | **70.93** | **MISSED** | forward lean, low in frame |
+| — | — | 18 | **75.53** | **MISSED** | forward lean, low in frame |
+| 16 | 82.362 | 19 | 79.15 | captured | lean, butt behind back, very late |
+| — | — | 20 | **83.17** | **MISSED** | big lean, head ~50% frame height |
+| 17 | 96.937 | 21 | 90.29 | captured, ~3 s late fire | slight lean, arm over head, arm behind |
+| 18 | 100.163 | 22 | 93.52 | captured | regular with fwd/back arm |
+| — | — | 23 | **96.57** | **MISSED** | regular / slight lean |
+| 19 | 106.064 | 24 | 99.44 | captured | regular |
+
+### 6 confirmed misses classified by scenario
+
+| PF time | Scenario | Suspected failure mode |
+|---|---|---|
+| 21.38 | regular run | anomaly — needs frame forensics |
+| 34.31 | slow, arms-by-side, big leg steps | sparse mask (fill_ratio < 0.20) — possibly PF §5.5 texture |
+| 70.93 | forward lean, low in frame | §27 floor + §35 upper-half filter reject |
+| 75.53 | forward lean, low in frame | §27 floor + §35 upper-half filter reject |
+| 83.17 | big lean, head ~50% frame | §27 floor + §35 upper-half filter reject |
+| 96.57 | regular / slight lean | likely §35 borderline or timing |
+
+### Rejection-cause excerpts from log (pre-scenario mapping)
+
+Log windows around each miss showed:
+- Near 26.11 (our #6, late): `empty_strip all_empty` at frames 817, 957.
+- Near 38.15 (captured PF, but miss is 34.31 earlier): `fill_ratio 0.13–0.19/0.20` at frames 1061–1067 — hollow/sparse body under slow pace.
+- Near 75.53 (miss): `local_support need=25` at frames 1750–1756.
+- Between our #16 and #17 (misses 83.17 etc.): mix of `empty_strip all_empty` and `gate_col_run tallest=41–50 need=51–54` — qualifier 1–10 px below §27 floor.
+- Between our #18 and #19 (miss 96.57): `empty_strip detY=161 thick=empty` at frame 3069 — §40 stretch placed detY into an inter-limb gap; §38 thick check correctly rejected, but no fallback = no fire.
+
+### Late-fire / misplacement on captured laps
+
+- Our #4 (PF#3 12.79): detected but too low on body ("should've been earlier on chest"). Picker or §40 chose wrong run / over-stretched.
+- Our #6 (PF#6 26.11): fired late. "big hand and leg swipes" confused the picker into waiting.
+- Our #16 (PF#19 79.15): fired "very late" with butt behind back. Lean regime + §35 upper-half bias on already-compressed blob.
+- Our #17 (PF#21 90.29): fired ~3 s late (our 96.937 vs PF-equivalent 96.94 expected at offset — coincidentally on time, but gap structure suggests our capture was from the *following* true crossing or a very delayed fire). Needs deeper look.
+
+### Headline diagnosis
+
+**4 of 6 misses are forward-lean / low-in-frame.** This is
+the dominant failure mode of §37/§38/§40 as shipped. Pair of
+gates responsible:
+- §27 absolute floor (51 px qualifier run) rejects the
+  compressed torso run on a lean.
+- §35 upper-half filter (`startY < blobMidY`) rejects
+  whatever survives because the lean pushes the torso-start
+  into the lower half of the bbox.
+
+**1 miss (34.31) is slow + arms-by-side** — sparse mask.
+Partially a PF §5.5 color-contrast / texture problem.
+
+**1 miss (21.38) is a regular run** that shouldn't have
+failed. Data blip or an edge case in §37 / §38 not yet
+characterized. Needs frame-level forensics.
+
+### Positive signals from §37/§38/§40
+
+- `[LIMB_WAIT_RELEASE]` fires in several places, indicating
+  §37 is releasing after 3 suppressed frames as designed.
+- §38 thick EMPTY_STRIP correctly rejected a bad §40
+  placement at frame 3069 (miss 96.57) — better a miss than
+  a misplaced fire.
+- §40 short-run stretch did not produce obvious over-fire
+  regressions on clean laps (laps 11–14 all good, tight Δy).
+
+### Violations of behavioral requirements
+
+- CLAUDE.md Req #6 ("must work when user leans forward") is
+  violated 4× in this run. **This is the priority fix.**
+- Req #1 (torso crossings fire) holds on clean laps but
+  fails on slow-arms-side (34.31).
+- Req #5 (fast and slow crossings) partially fails on slow
+  (34.31) and on leaning sprints.
+
+### Next steps
+
+No code changes yet. Pending user approval on priority:
+1. Lean fix: scale §27 floor by blob height; bypass §35
+   upper-half filter when aspect ratio indicates a lean.
+2. Frame forensics on PF 21.38 miss to understand the
+   regular-run failure.
+3. Slow/arms-side (PF 34.31) — likely scenario-limited per
+   PF §5.5; defer.
+
+Also pending: commit of the `maxExposureCapMs = nil` change
+in CameraManager.swift (already applied, build passes, not
+yet committed).
+
+## Run 2026-04-16 Test YY — front cam, PF parallel, 9/17, lean-dominant misses
+
+### Context
+
+Session 2 of back-to-back pair (session 1 = 8 fires,
+treated as warmup per user). Wall-clock start
+**2026-04-16T20:44:23Z**
+(`session_2026-04-16_164423.log`). Duration ~67 s.
+
+Front camera, bright conditions (exp≈6.2 ms iso=24
+throughout). Parallel Photo Finish on a second phone,
+**~10 cm between lenses** (user-confirmed — accounts for
+the sub-100 ms Δ on most captures).
+
+Engine config at session start (from ENGINE_CONFIG):
+§34 band=9 projected (`gate=col90±4_projected`),
+§35 temporalWait=upperHalf, §37 limbWait release after
+3, §38 empty-strip col9 band, §40 short-run stretch at
+0.70.
+
+PF fired 17 crossings (PF Lap 1 at 00.00 = start
+crossing). We captured 9. Synced offset our-clock −
+PF-clock = **+6.258 s** (our Lap 1 = PF 00.00).
+
+### Synced pairing with user-supplied scenario tags
+
+| PF # | PF time | Our # | Our time (synced) | Δ (s) | Status | Scenario (user) |
+|---|---|---|---|---|---|---|
+| 1 | 00.00 | 1 | 00.000 | 0.000 | captured | Close to camera, regular run |
+| 2 | 04.19 | 2 | 04.239 | +0.049 | captured | Normal distance, torso ~50% frame ht, arms-at-side run |
+| 3 | 07.95 | — | — | — | **missed** | Forward lean, head ~50% frame ht |
+| 4 | 11.99 | — | — | — | **missed** | Forward lean, a tad further back |
+| 5 | 15.60 | — | — | — | **missed** | Even bigger forward lean, body looks smaller |
+| 6 | 19.25 | — | — | — | **missed** | Big forward lean, closer to frame |
+| 7 | 23.22 | 3 | 23.229 | +0.009 | captured | Same lean as others — detected perfectly |
+| 8 | 26.27 | 4 | 26.269 | −0.001 | captured | Much closer forward lean, perfect |
+| 9 | 29.84 | 5 | 29.824 | −0.016 | captured (**Δy +36**) | Regular run — app detected CHIN, same x as torso |
+| 10 | 33.01 | 6 | 33.046 | +0.036 | captured | Regular, closer to frame, rejected hands nicely |
+| 11 | 36.15 | 7 | 36.253 | +0.103 | captured | PF fired on front (vertical hand/leg). We fired on back of body / hand swing behind |
+| 12 | 39.89 | 8 | 39.940 | +0.050 | captured | PF perfect (regular + arm swing). We fired on back of body (too late) |
+| 13 | 43.25 | — | — | — | **missed** | Regular run, **further from camera** |
+| 14 | 46.20 | — | — | — | **missed** | Regular run, same distance as #13 |
+| 15 | 49.28 | 9 | 49.291 | +0.011 | captured | Scrunch lean, further from camera, detected nicely |
+| 16 | 52.50 | — | — | — | **missed** | Even more dip than #15 (far + more lean) |
+| 17 | 1:02.92 | — | — | — | excluded | Phone take-down — detection irrelevant |
+
+Σ|Δ| across 9 captures = **0.275 s** → **30.6 ms mean
+abs timing error**. Lap 7 (+0.103 s) is the worst and
+coincides with the Lap 5 Δy+36 placement regression
+(different laps — user tagged Lap 7 as "back of body"
+fire, Lap 5 as "chin").
+
+### Miss breakdown by scenario
+
+| Cause | Misses | PF # |
+|---|---|---|
+| Forward lean (Req #6 violation) | 5 | 3, 4, 5, 6, 16 |
+| Regular run, further from camera | 2 | 13, 14 |
+| Irrelevant (phone take-down)   | 1 | 17 |
+
+**Leans dominate — 5 of 7 detector-relevant misses.**
+This matches Test XX's 4-lean signature (§42 territory).
+Cumulative lean misses across XX + YY = **9**.
+
+**2 distance-regular misses (PF #13, 14) are new** —
+not seen in Test XX (user stayed at a single distance
+there). Small-blob / narrow-aspect signature.
+
+### USER_MARK Δy table
+
+(Synced times = raw − 6.258. detY/userY from USER_MARK
+log lines; convention Δy = userY − detY.)
+
+| Our # | Synced | detY | userY | Δy | Notes |
+|---|---|---|---|---|---|
+| 1 | 00.000 | 165 | 165 | +0 | clean |
+| 2 | 04.239 | 152 | 152 | +0 | clean |
+| 3 | 23.229 | 173 | 173 | +0 | §40 stretch fired |
+| 4 | 26.269 | 171 | 171 / 173 | +0 / +2 | §40 fired; 2 taps |
+| 5 | 29.824 | 115 | 151 | **+36** | Picker glued head+torso → detY in chin zone |
+| 6 | 33.046 | 153 | 149 | −4 | clean |
+| 7 | 36.253 | 137 | 140 / 147 | +3 / +10 | 2 taps (user uncertain) |
+| 8 | 39.940 | 151 | 160 | +9 | "Back of body (too late)" per user |
+| 9 | 49.291 | 173 | 171 / 171 | −2 / −2 | §40 fired; 2 consistent taps |
+
+Σ|Δy| = 64 across 9. Excluding Lap 5 outlier: Σ|Δy|
+= 28 → **3.5 px/lap mean — excellent placement on
+8 of 9.**
+
+### Reject windows mapped to PF misses
+
+Frame-to-PF-time math: synced PF time + 6.258 = our raw
+time; frame ≈ raw × 30.
+
+| PF # | Scenario | Expected frame | Reject window | Reject signature |
+|---|---|---|---|---|
+| 3 | Fwd lean, head ~50% ht | ~426 | f428–434 | LS run=8–23, blob h=181–202 |
+| 4 | Fwd lean, further back | ~547 | f544–555 | LS + fill=0.19 |
+| 5 | Bigger lean, small body | ~655 | f652–666 | LS run=11–18 |
+| 6 | Big lean, closer | ~765 | f762–774 | LS run=21–24 |
+| 13 | Regular, far | ~1485 | f1483–1487 | LS run=22, blob **64×176** (narrow) |
+| 14 | Regular, far | ~1573 | f1573 (isolated) | GATE_RUNS_FULL longest=34 |
+| 16 | Deeper dip + far | ~1763 | f1763–1772 | LS run=12–17 |
+| 17 | Post-session | ~2076 | n/a (session ended ~f2010) | detection stopped |
+
+**Every reject cluster in the log maps to a PF miss
+within ≤0.5 s.** PF and our detector see the same
+physical events; our detector rejects them.
+
+### Rejection signature — same LS layer, two root causes
+
+All 7 detector-relevant misses surface at the
+local_support filter (single-column uninterrupted run
+≥ 25). Scenario tags show this is **not** a single
+failure mode. Two distinct physical causes converge at
+LS:
+
+1. **Lean compression** (PF #3, 4, 5, 6, 16 — five
+   misses): forward lean shortens the vertical extent
+   of the torso at the gate column. Gate-col run drops
+   below 25. Also drops below §27's 51-px qualifier
+   floor.
+
+2. **Distance / small blob** (PF #13, 14 — two misses):
+   regular upright posture far from the camera produces
+   a narrower/shorter blob (64×176 at #13). Blob height
+   sits at or just above the 176-px floor; LS rejects
+   on the per-frame variance.
+
+Both reject via `LS_COUNTERFACT run=X … pass=N` in the
+log, but the underlying physical cause differs. Any fix
+must handle both without admitting hand-swipes.
+
+### Placement regression — Lap 5 (PF #9, 29.824, Δy+36)
+
+Frame 1084: blob 162×256. Picker merged
+[64..133:70] + [135..234:100] across a 1-px gap at
+Y=134 into one 171-tall run. detY = 64 + 0.30 × 171 =
+115 (chin zone). User confirmed: "our app detected chin
+but same x position as torso".
+
+Hypothesised cause: §34's thick-gate projection (cols
+86..94) increases the probability of closing 1-px
+vertical gaps across multiple columns — head-run and
+upper-torso-run get glued together more readily than
+under single-column logic.
+
+The fix is not obvious — any suppression of 1-px gap
+closure risks breaking the LS-fragmentation mitigation
+we'd want for the lean/distance misses.
+
+### Late-fire "back of body" captures — Laps 7, 8
+
+User tagged Laps 7 and 8 as "back of body (too late)":
+- Lap 7 (+0.103 s, PF fired on front protrusion —
+  vertical hand/leg — we fired on back after the body
+  had passed).
+- Lap 8 (+0.050 s, PF fired on regular torso + arm
+  swing, we caught the trailing back).
+
+Timing/picker issue independent of the miss pattern.
+Possibly §35 upper-half filter suppressing the leading-
+edge frame until the body is fully through the gate.
+Needs investigation but not the priority.
+
+### Open items
+
+1. Scenario tags now complete — see §42 and §45 updates
+   in `detector_hypotheses.md`.
+2. §42 lean-rescue candidates (height-scaled floor,
+   §35 bypass on lean aspect) now have 9 total lean
+   misses as evidence. Hand-swipe regression plan
+   required before shipping.
+3. New §45 distance-regular hypothesis (blob 64×176 at
+   f1485) — 2 misses, needs more far-distance data
+   before prioritizing.
+4. Lap 5 placement regression — §34 projection
+   amplification of 1-px gap closure. Investigate
+   whether band=1 would behave differently here.
+5. Late-fire picker investigation (Laps 7, 8) —
+   separate workstream.
+6. User request (separate): timer should start at first
+   crossing (00.00 = Lap 1) instead of at app start,
+   for easier PF parity debugging in future tests.
+
+## Run 2026-04-16 Test YY — outdoor dip-stress + parallel PF
+
+### Context
+
+First run under the deep-detector-analysis pipeline re-read
+(§42 H-LEAN-GEOMETRY-RESCUE hypothesis proposed but NOT
+shipped). `maxExposureCapMs=nil` active. Goal of the test:
+isolate the lean/dip / low-in-frame failure mode against
+parallel PF ground truth so we can distinguish (a) compressed-
+blob detection holes from (b) picker/placement bugs on
+captured-but-misplaced crossings.
+
+Scenario block: deliberate dips and forward-lean crossings at
+near and far distances, plus normal crossings as control.
+Outdoor with PF running on a parallel phone.
+
+### Our 16 [CROSSING] timestamps
+
+0.000 (detect-start artifact), 2.734, 19.037, 41.442, 49.660,
+53.428, 57.162, 61.329, 69.455, 74.315, 82.196, 85.654,
+88.652, 91.835, 94.516, 98.297
+
+### PF's 19 published crossings
+
+5.17, 8.92, 12.79, 17.65, 21.38, 26.11, 30.04, 34.31, 38.15,
+42.26, 48.82, 52.74, 56.41, 60.31, 63.86, 67.51, 70.93,
+75.53, 79.15
+
+### Clock-mapped alignment (from user's table)
+
+| Our # | Our time | PF time | Scenario | Status | Notes |
+|---|---|---|---|---|---|
+| 1 | 0.000 | — | — | artifact | detect-start blip |
+| 2 | 2.734 | 5.17 | Normal | captured | Δy +2 |
+| 3 | 19.037 | 8.92 | Normal | captured (gappy before) | Δy +3 |
+| — | — | **12.79** | **Dip (Far)** | **MISSED** | GATE_RUNS_FULL longest=30–49 floor=50 f1628–1641 |
+| 4 | 41.442 | 17.65 | Dip (Far) | captured | Δy −2 |
+| — | — | **21.38** | **Dip (Far)** | **MISSED** | longest=27–44 floor=50; some frames no blob candidate (heightFraction=0.55 dropped compressed blob) f1858–1865 |
+| 5 | 49.660 | 26.11 | Dip/Low (Near) | captured | Δy +1 |
+| 6 | 53.428 | 30.04 | Dip/Low (Near) | captured | Δy +1 |
+| 7 | 57.162 | 34.31 | Dip/Low (Near) | **captured but late + mid-body** | Δy −12, userX=122 (32 px past gate), user: "fires mid-body way too late" |
+| 8 | 61.329 | 38.15 | Dip/Low (Near) | captured | Δy −1 |
+| — | — | **42.26** | **Dip/Low (Near)** | **MISSED** | f2464–2479: `gate_col_run tallest=25–44 need=50`, plus `local_support run=12 need=25` (§23). mergedMax2=55–125 on some frames = would pass §27 floor if blob formed, but blob didn't reach candidate stage |
+| 9 | 69.455 | 48.82 | Dip/Low (Near) | captured | Δy −1 |
+| 10 | 74.315 | 52.74 | Mod Dip (Far) | **captured but late + low** | Δy −10, userX=137 (47 px past gate), user: "way too far back on the dip" |
+| — | — | **56.41** | **Less Dip (Far)** | **MISSED** | f2852–2862: `gate_col_run tallest=41 need=50`, `local_support run=16–21 need=25`, one `empty_strip` where 83-px qualifier's probe row was width=0 |
+| 11 | 82.196 | 60.31 | Normal (Near) | captured | Δy +4 |
+| 12 | 85.654 | 63.86 | Normal (Near) | captured | (no mark) |
+| 13 | 88.652 | 67.51 | Normal (Near) | captured | Δy −1 |
+| 14 | 91.835 | 70.93 | Normal (Near) | **captured but trailing** | Δy +3, userX=69 (21 px behind gate), user: "fires too far back mid-torso" — horizontal trailing-edge, vertical fine |
+| 15 | 94.516 | 75.53 | Normal (Near) | **captured but early + knee** | Δy −27, userX=66, user: "fires in front of body on my knee" — early fire + detY on knee (leg-run picked on lean) |
+| 16 | 98.297 | 79.15 | Normal (Near) | captured | Δy +1 |
+
+### Missed-crossing rejection signatures
+
+All 4 full misses are dips. Rejection logs cluster around three
+gates:
+
+1. **§27 absolute floor (50 px)** — `gate_col_run
+   tallest=27–49 need=50`. Primary failure mode.
+2. **§23 local-support 25-px floor in analyzeGate** —
+   `local_support run=12–21 need=25`. Secondary mechanism
+   when §27 somehow passes.
+3. **`heightFraction=0.55` blob prefilter** — some missed
+   frames show `GATE_RUNS_FULL` with NO follow-up REJECT,
+   meaning no blob even formed a candidate. Blob was
+   compressed below 176 px in those frames. PF spec §4.1
+   allows 30% (96 px) tall blobs; we require 55% (176 px).
+
+### Captured-but-misplaced signatures (4 crossings)
+
+Distinct failure class from missed crossings. Here the blob
+and qualifier passed all gates, but §31 torso-bias picker
+and/or §40 stretch chose the wrong run.
+
+- **#7 (Δy −12, late)** — dip-regime, userX=122 = 32 px
+  past gate. We fired on a frame where the body was well
+  through, picker landed on mid-torso/hip.
+- **#10 (Δy −10, late + low)** — dip-regime, userX=137 =
+  47 px past gate. Fired very late on a dipped body.
+- **#14 (Δy +3 but horizontally trailing)** — userX=69 =
+  21 px *behind* gate (body moving R>L, tap is on trailing
+  edge). Vertical fine; horizontal strip logic anchored
+  mid-bbox instead of leading edge.
+- **#15 (Δy −27, early + knee)** — lean-regime,
+  userX=66, picker chose a lower-body run as "upper half"
+  qualifier because blobMidY had dropped below the waist on
+  the lean. §35 upper-half filter assumes upright posture
+  and fails here.
+
+### Headline diagnosis
+
+Two distinct mechanisms confirmed:
+
+1. **Compressed-blob detection hole** — three absolute-pixel
+   floors (§27=50, §23=25, heightFraction=176) reject a body
+   that PF spec says should fire. Per spec §4.1 verbatim:
+   *"a runner leaning forward steeply had only ~6% of frame
+   height at the gate column, but still triggered because
+   the forward chest region was connected to a much larger
+   body blob that was well over 30% tall."* 6% of 320 = 19
+   px. We require 50. Our floor is ~2.5× what PF accepts.
+2. **Lean/dip picker bias** — §31 torso-bias picker and §35
+   upper-half `blobMidY` filter both assume upright posture.
+   On a leaning blob where `blobMidY` has fallen below the
+   waist, leg-runs pass §35 as "upper half" and §31 picks
+   them. Result: detY on knee (#15), hip (#7/#10), or the
+   trailing edge (#14).
+
+Both failure classes trace to the same root: **pipeline
+decisions keyed on absolute pixel positions or frame-relative
+ratios that assume upright posture.**
+
+### Violations of behavioral requirements
+
+- CLAUDE.md Req #6 ("must work when user leans forward") —
+  violated 8 ways (4 misses + 4 misplacements) in this run.
+- Req #1 (torso crossings fire at mid-chest, Δy ≤ 15) —
+  violated on #7, #10, #15.
+- Req #5 (fast/slow crossings) — partially OK on slow
+  normals, fails on slow dips.
+
+### Next steps (proposed, pending user confirmation)
+
+No detector code changes yet. Priority order per CLAUDE.md
+one-issue-at-a-time:
+
+1. **Test ZZ — upright arm-swipe regression control.** 8
+   intentional arm-only swipes with body still or
+   off-screen, plus 2 upright normal runs. Parallel PF.
+   Purpose: before we lower §27 / §23 / heightFraction
+   floors to match PF spec §4.1, verify that body-part
+   suppression + aspect + fill gates can still reject arm
+   swipes. If current pipeline admits arm swipes, we have a
+   BPS bug to fix first.
+2. If Test ZZ confirms arm-swipe safety: ship §42
+   H-LEAN-GEOMETRY-RESCUE as a coordinated change — scale
+   §27 and §23 floors by blob height; lower heightFraction
+   prefilter; leave §35/§31 alone until lean-dip picker
+   audit completes.
+3. Lean-dip picker audit (separate hypothesis §44) — not
+   yet proposed in detail; needs its own test isolating
+   the "fired on knee / hip / trailing edge" failure class
+   on crossings that were at least captured.
+

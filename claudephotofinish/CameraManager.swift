@@ -21,6 +21,14 @@ final class CameraManager: NSObject, ObservableObject {
     @Published private(set) var timerStop: Date? = nil
     @Published var runNumber: Int = 1
 
+    /// Engine-relative time of the first crossing in this session. Lap 1's
+    /// stored `record.time` is normalized to 0.00 (so the first visible lap
+    /// matches Photo Finish's Lap 1 = 00.00 convention) and `timerStart` is
+    /// shifted forward by this amount so the on-screen timer also reads
+    /// 00.00 at the moment Lap 1 fires. Reset by `startDetection` and
+    /// `resetSession`.
+    private var firstCrossingTime: TimeInterval? = nil
+
     // MARK: Camera tuning (exposed to the UI)
     //
     // Max shutter the *auto* exposure algo is allowed to pick. iOS session
@@ -32,9 +40,10 @@ final class CameraManager: NSObject, ObservableObject {
     // blob filters kill any speckles that do survive.
     /// Max shutter duration the auto-exposure algorithm is allowed to pick.
     /// `nil` means "use the active format's built-in default" (sets
-    /// `activeMaxExposureDuration = .invalid`). This is the lever for
-    /// matching Photo Finish sharpness — short cap + auto-ISO, same as PF.
-    @Published var maxExposureCapMs: Double? = 16.0 {
+    /// `activeMaxExposureDuration = .invalid`). PF paper §4.4: exposure
+    /// ranges 0.5–33 ms with no cap — auto-exposure lands near ~1 ms in
+    /// bright daylight on its own. Default to `nil` to match PF.
+    @Published var maxExposureCapMs: Double? = nil {
         didSet { applyExposureSettings() }
     }
     @Published var isManualExposure: Bool = false {
@@ -377,6 +386,7 @@ final class CameraManager: NSObject, ObservableObject {
         crossings = []
         timerStart = Date()
         timerStop = nil
+        firstCrossingTime = nil
         frameCount = 0
         droppedFrameCount = 0   // discard idle-period drops
         lastCaptureWallTime = 0 // start [GAP] measurement fresh
@@ -454,6 +464,7 @@ final class CameraManager: NSObject, ObservableObject {
         crossings = []
         timerStart = nil
         timerStop = nil
+        firstCrossingTime = nil
         runNumber += 1
         engine.reset()
         slog("[SESSION] reset, starting run #\(runNumber)")
@@ -614,10 +625,23 @@ extension CameraManager: AVCaptureVideoDataOutputSampleBufferDelegate {
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                // Normalize times so Lap 1 = 00.00, matching Photo Finish's
+                // convention and making PF-parity comparisons a straight
+                // subtraction (no +6.258 s manual offset).
+                let adjustedTime: TimeInterval
+                if self.firstCrossingTime == nil {
+                    self.firstCrossingTime = result.crossingTime
+                    adjustedTime = 0
+                    if let ts = self.timerStart {
+                        self.timerStart = ts.addingTimeInterval(result.crossingTime)
+                    }
+                } else {
+                    adjustedTime = result.crossingTime - (self.firstCrossingTime ?? 0)
+                }
                 let record = LapRecord(
                     id: UUID(),
                     crossingNumber: self.crossings.count + 1,
-                    time: result.crossingTime,
+                    time: adjustedTime,
                     thumbnailData: thumbData,
                     gateY: result.gateY,
                     rawGateY: result.rawGateY,

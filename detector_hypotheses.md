@@ -4592,3 +4592,392 @@ confirms the "early fire" behavior.
 
 ---
 
+## §42 H-LEAN-GEOMETRY-RESCUE (proposed, not shipped) — Test XX diagnosis
+
+### Evidence
+
+Test XX (outdoor, 25 PF crossings, we captured 19). Of the 6
+misses, 4 are forward-lean / low-in-frame:
+
+- PF 70.93 — forward lean, low in frame
+- PF 75.53 — forward lean, low in frame
+- PF 83.17 — big lean, head ~50% of frame height
+- PF 96.57 — regular / slight lean
+
+Log signatures clustered around:
+- `gate_col_run tallest=41–50 need=51–54` — qualifier run
+  1–10 px below §27 absolute floor.
+- `empty_strip all_empty` on thick band — confirming no
+  alternate qualifier in the ±4 projection either.
+- On captured-but-late leans (our #16 PF#19 79.15, our #17
+  PF#21 90.29), §35 appeared to suppress until a later frame
+  where the lean had advanced far enough to produce an
+  upper-half run — but by then the body was past center.
+
+### Hypothesis
+
+When the body is in a forward-lean / low-profile posture,
+two existing gates reject the valid crossing frame:
+
+1. **§27 absolute floor (51 px)** — a leaning torso at
+   320-px processing height compresses vertically. The
+   gate-column qualifier run drops to 41–50 px, fails floor.
+2. **§35 upper-half filter (`startY < blobMidY`)** — a
+   leaning body sits low in its own bbox, so the torso run's
+   start-Y is >= blobMidY. The filter rejects what would
+   otherwise be the correct run.
+
+Both were tuned for upright standing/running posture.
+CLAUDE.md behavioral Req #6 ("must work when user leans
+forward") is directly violated.
+
+### Proposed rule
+
+Detect lean via blob aspect ratio (width ÷ height ≥ some
+threshold, e.g. 0.65 — a truly upright runner is closer to
+0.4). When lean is detected:
+
+a. **Scale §27 floor by blob height.** Instead of absolute
+   51 px, require `qualifierHeight ≥ 0.28 × blobHeight`.
+   For a 180-px-tall leaning blob this drops the floor to
+   ~50; for a compressed 140-px blob it drops to ~39.
+b. **Bypass §35 upper-half filter on lean blobs.** A lean
+   naturally puts the torso-start below blobMidY; filtering
+   on blobMidY is structurally wrong in this posture.
+
+`torsoBias` §31 picker remains active — it still chooses the
+widest-lower run (torso) over the narrower head/leg runs.
+
+### Risks
+
+- Hand swipes: typically very wide-flat (aspect > 1.0) but
+  are already rejected by `maxAspectRatio = 1.2` prefilter
+  *and* by the 50-px qualifier length floor (not §27). So
+  lean-rescue on aspect 0.65–1.0 should not re-admit swipes.
+- Leg-only motion: legs in front of body can produce a
+  low-in-bbox run. Lean-rescue would release §35, potentially
+  firing on legs. Mitigation: torsoBias picker favors wider
+  runs; a single thin leg-run is narrower than the leaning
+  torso.
+- Test XX's slow-arms-side miss (34.31) is a separate
+  failure mode (sparse mask / fill_ratio) and §42 does not
+  address it.
+
+### Log
+
+- `[LEAN_DETECT] frame=N aspect=A.AA heightCompressed=Y/N
+  §27scaledTo=X §35bypassed=Y/N` when lean-rescue engages.
+
+### Status
+
+Proposed, not shipped. Priority 1 from Test XX — 4/6 misses
+are in this regime. Awaiting user approval to ship.
+
+---
+
+## §43 H-REGULAR-RUN-ANOMALY-21.38 (investigation, not shipped)
+
+### Evidence
+
+Test XX miss PF#5 (21.38) user scenario: "regular run". This
+should NOT have failed — clean upright run-through. All
+other 5 misses in Test XX have a clear posture explanation;
+this one does not.
+
+### Hypothesis
+
+Three candidates, needs frame forensics to distinguish:
+a. §37 LIMB_WAIT_RELEASE held for one frame past the real
+   crossing, letting the body pass center before fire.
+b. §38 thick EMPTY_STRIP rejected a valid detY because the
+   picked run landed in a momentary mask-thin band.
+c. §40 short-run stretch fired outside the blob mask
+   (similar to frame 3069 on miss 96.57) but without
+   §38 catching it, so it was rejected by a different rule.
+
+### Next step
+
+Before proposing a fix, pull frames around 28.0 (our clock,
+= PF 21.38 + 6.65 offset) and examine:
+- Blob bbox / fill ratio / aspect
+- Qualifier run lengths per frame
+- §37 wait counter state
+- §40 stretch invocation
+
+### Status
+
+Investigation only. Do NOT ship §43 until root cause is
+identified. Risk: touching §37/§38/§40 without understanding
+21.38 could regress the other 5 miss-mitigations.
+
+---
+
+
+## §42 update — Test YY confirmation (5 additional lean misses)
+
+### Evidence added
+
+Test YY (2026-04-16T20:44:23Z, front cam, PF parallel,
+17 PF crossings). User-supplied scenario tags identify
+5 additional forward-lean misses:
+
+| PF # | PF time | Scenario (user) | Reject (log) |
+|---|---|---|---|
+| 3 | 07.95 | Fwd lean, head ~50% frame ht | LS run=8–23, blob h=181–202 |
+| 4 | 11.99 | Fwd lean, a tad further back | LS + fill=0.19 |
+| 5 | 15.60 | Bigger lean, body looks smaller | LS run=11–18 |
+| 6 | 19.25 | Big fwd lean, closer to frame | LS run=21–24 |
+| 16 | 52.50 | Deeper dip + further from camera | LS run=12–17 |
+
+Combined with Test XX's 4 lean misses (PF 70.93, 75.53,
+83.17, 96.57), §42 now has **9 confirmed lean misses**
+across two distinct PF-parallel sessions.
+
+### Signature confirmed
+
+Both Test XX and Test YY leans show the same reject
+layers:
+
+- LS single-col run < 25 (`LS_COUNTERFACT … pass=N`).
+- Or §27 absolute floor (`gate_col_run tallest=X need=51+`).
+- Or §35 upper-half filter (lean puts torso-start in
+  lower half of bbox → rejected).
+
+Physical cause: lean vertically compresses the torso at
+the gate column. Height compression + posture shift
+combine to fail multiple gates simultaneously.
+
+### Candidate rules (unchanged from original §42)
+
+a. **Scale §27 floor by blob height**: require
+   qualifier ≥ 0.28 × blobHeight rather than absolute
+   51 px. Compressed blobs get a proportionally lower
+   floor.
+b. **Bypass §35 upper-half filter on lean blobs**:
+   detected via aspect ratio ≥ 0.55–0.65 (upright is
+   closer to 0.4). Lean naturally puts torso-start
+   below blobMidY; filter is structurally wrong in this
+   posture.
+
+### Priority
+
+§42 is now the **highest-signal unfixed issue** —
+9 confirmed misses, CLAUDE.md Req #6 directly violated,
+reproducible across two sessions. Still not shipped;
+hand-swipe regression test needed first (a lean-rescue
+must NOT admit wide-flat hand swipes, which share the
+aspect-ratio zone).
+
+### Not blocked on
+
+Placement of captured leans is good (Test YY Laps 3, 4,
+9 at Δy 0 / +0/+2 / −2). So §42 is a miss-rate fix, not
+a placement regression risk.
+
+---
+
+## §45 H-DISTANCE-REGULAR-MISS — new, from Test YY
+
+### Evidence
+
+Test YY had 2 misses on "regular run, further from
+camera" (PF #13, 14). User tagged both as upright
+regular crossings — no lean, no posture complexity —
+just increased distance from the camera.
+
+| PF # | Expected frame | Reject window | Blob observed | Signature |
+|---|---|---|---|---|
+| 13 | ~1485 | f1483–1487 | **64×176** | LS run=22, blob h AT the 176 floor |
+| 14 | ~1573 | f1573 only | (partial log) | GATE_RUNS_FULL longest=34 |
+
+Blob 64×176: width 64 (aspect 0.36 — very narrow),
+height exactly at the `heightFraction = 0.55 × 320 =
+176` floor. This is a small, narrow silhouette —
+consistent with a person further from the camera.
+
+### Hypothesis
+
+The blob-geometry prefilters (`heightFraction = 0.55`,
+`widthFraction = 0.08`) are calibrated for subjects
+close to the camera. When the subject is further:
+
+1. Apparent height drops toward the 176-px floor. Any
+   per-frame mask variance drops some frames below.
+2. Apparent width drops toward the ~14-px floor.
+3. The diff mask at the gate column has fewer pixels
+   per row, so LS single-col runs are shorter even with
+   no fragmentation.
+
+Combined: fewer frames qualify all gates → no fire.
+
+### Distinction from §42 (lean)
+
+§42 blobs are **compressed upright** (height reduced,
+width similar, aspect 0.55–0.75). §45 blobs are
+**scaled uniformly** (both height and width reduced,
+aspect 0.30–0.45, matching the subject's actual
+proportions at distance).
+
+The reject layer is the same (LS), but the physical
+cause is different:
+- §42: vertical compression (fixable by scaling floors
+  by blob height).
+- §45: overall scale reduction (fixable by scaling
+  floors by blob *area* or by distance estimate).
+
+### Candidate rules (not shipped)
+
+a. **Relax LS when blob is at the height floor AND
+   aspect is normal upright (0.30–0.50).** Target
+   "small upright body" rather than "fragmented mask".
+b. **Secondary LS path via GATE_RUNS_FULL**: if
+   `mergedMax2 ≥ 40` AND blob is at or above floor,
+   accept merged run for LS even when single-col is
+   shorter.
+c. **Lower `heightFraction` to 0.45** — admit blobs
+   down to 144 px tall. High regression risk — would
+   admit torsos and leg-only motion.
+
+Same caveat as §42: any LS relaxation must be gate-pass
+only, not feeding back into picker run-length input
+(see Lap 5 Δy+36 regression).
+
+### Status
+
+Proposed, not shipped. Lower priority than §42
+(2 misses vs 9). Collect more far-distance-crossing
+data in the next test before code change. Specifically,
+need to observe whether the same user at the same far
+distance fires reliably *some* of the time (if yes,
+it's per-frame variance; if no, it's a systematic
+scale problem).
+
+### Retires the Test YY-only "§44 LS fragmentation"
+### working hypothesis
+
+§44 was considered on Test YY's pre-scenario data as a
+single LS-fragmentation failure mode. User scenario
+tags (forward-lean for 5 misses, distance-regular for
+2 misses) show the single LS-reject signature has **two
+distinct physical causes**. Those causes split into §42
+(lean) and §45 (distance). §44 as a general hypothesis
+does not add explanatory power and is not added to the
+doc.
+
+---
+## §42 H-LEAN-GEOMETRY-RESCUE — Test YY update 2026-04-16
+
+### Test YY evidence
+
+Test YY (outdoor, parallel PF, 19 PF crossings vs 15 ours
+after discarding the detect-start artifact). 4 full misses
+and 4 captured-but-misplaced crossings, all concentrated in
+the dip/lean scenarios.
+
+**Misses** (all dips): PF 12.79, 21.38, 42.26, 56.41. Log
+signatures consistently show `gate_col_run tallest=25–49
+need=50` (§27 floor), `local_support run=12–21 need=25` (§23
+analyzeGate floor), and on some frames no blob candidate at
+all (heightFraction=0.55 prefilter dropped compressed blob
+before §23 even ran).
+
+**Misplacements** (our #7 Δy−12 late, #10 Δy−10 late, #14
+trailing, #15 Δy−27 early on knee). These are a DIFFERENT
+failure class — blob and qualifier passed gates, but §31
+torso-bias picker + §35 upper-half `blobMidY` rule chose the
+wrong run because a leaning body has `blobMidY` below waist.
+
+### Revised hypothesis — confirmed and split
+
+§42 as originally proposed (scale §27 floor to blob height +
+bypass §35 on lean aspect) addresses **only the missed
+crossings**, not the misplacements. Test YY confirms the two
+classes are mechanistically distinct:
+
+- **§42a COMPRESSED-BLOB FLOOR RESCUE** — scale §27 floor,
+  §23 local-support floor, AND lower `heightFraction`
+  prefilter to something closer to PF spec §4.1's 30%
+  (currently 55%). Recovers the 4 full misses. Touches
+  floors only, not picker.
+- **§44 PICKER-POSTURE-AWARE (new, proposed)** — §31
+  torso-bias picker needs a lean-aware override: when aspect
+  > 0.5, don't use `blobMidY` as the upper-half/lower-half
+  splitter. Possibly anchor on the widest vertical run in
+  the gate column, or fall back to blob-top + torsoFraction
+  placement. Addresses the 4 misplacements.
+
+### Divergence from PF spec §4.1 (now quantified)
+
+Spec §4.1 verbatim: *"a runner leaning forward steeply had
+only ~6% of frame height at the gate column, but still
+triggered because the forward chest region was connected to
+a much larger body blob that was well over 30% tall."*
+
+6% of 320-px processing height = 19 px. Our §27 floor is 50.
+**Our floor is ~2.5× stricter than what the spec says PF
+accepts.** Our §23 analyzeGate floor of 25 is also stricter
+than "local substantial connected slice" implies.
+
+Our `heightFraction = 0.55` (176 px) vs spec's 30% (96 px).
+**Our blob prefilter is ~1.8× stricter than PF's.**
+
+### Do-not-ship-until
+
+Test ZZ (arm-swipe regression control) must run first. Our
+floor-based arm-swipe rejection is load-bearing — can't
+lower it without proving the other gates (aspect ≤ 1.2,
+fill ≥ 0.20, body-part suppression, heightFraction) catch
+arm swipes independently.
+
+### Status
+
+Hypothesis confirmed on misses. Split into §42a and §44.
+Not yet shipped. Test ZZ required next.
+
+---
+
+## §44 H-PICKER-POSTURE-AWARE (proposed, not shipped)
+
+### Evidence
+
+Test YY captured-but-misplaced crossings:
+- #7 Δy −12 late, dip scenario, userX 32 px past gate
+- #10 Δy −10 late, dip, userX 47 px past gate
+- #14 Δy +3 but horizontally trailing (userX 21 px behind gate)
+- #15 Δy −27 early, lean, detY on knee (userY 158 vs detY 185)
+
+### Hypothesis
+
+§31 torso-bias picker picks the widest qualifier that passes
+§35 upper-half (`startY < blobMidY`). On a dipped or leaning
+body, `blobMidY` has fallen below the anatomical waist —
+because the head is near frame center and legs extend to
+frame bottom, the midpoint is approximately the hips. Leg-
+region vertical runs at the gate column now have startY
+*just above* blobMidY, so they pass §35 as "upper half."
+§31 then picks the widest leg-run over the narrower
+torso-run, placing detY deep in the lower body.
+
+### Proposed rule
+
+When blob aspect ratio ≥ 0.5 (indicates dip or lean —
+upright aspect is closer to 0.3–0.4), replace §35 upper-half
+splitter with one of:
+
+(a) Absolute splitter at `comp.minY + comp.height × 0.40`
+    — anatomically closer to waist than blobMidY on
+    compressed posture.
+(b) Pick the highest-startY qualifier (most head-ward) that
+    has length ≥ scaled floor, rather than the widest.
+(c) Fall back to §21 blob-fraction placement
+    (`comp.minY + 0.30 × comp.height`) for the FIRE decision
+    and §30 run-relative placement for detY — decoupling the
+    two.
+
+### Status
+
+Proposed, not shipped. Not yet prioritized above §42a.
+Needs its own controlled test after §42a ships.
+
+---
+

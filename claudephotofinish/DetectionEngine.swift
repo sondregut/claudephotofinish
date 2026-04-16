@@ -541,11 +541,11 @@ final class DetectionEngine {
 
         for comp in components {
             if comp.height < minH {
-                logReject("height", detail: "\(comp.height)/\(minH)")
+                logReject("height", detail: "\(comp.height)/\(minH)", comp: comp)
                 continue
             }
             if comp.width < minW {
-                logReject("width", detail: "\(comp.width)/\(minW)")
+                logReject("width", detail: "\(comp.width)/\(minW)", comp: comp)
                 continue
             }
 
@@ -581,7 +581,8 @@ final class DetectionEngine {
                                          fillRatio, fillFloor, aspect,
                                          comp.height, comp.width,
                                          hasQualifyingRun ? "Y" : "N",
-                                         longestQRLen, qualifyingMin))
+                                         longestQRLen, qualifyingMin),
+                          comp: comp)
                 continue
             }
             if comp.width > Int(aspectCeil * Float(comp.height)) {
@@ -590,11 +591,12 @@ final class DetectionEngine {
                                          aspect, aspectCeil, fillRatio,
                                          comp.height, comp.width,
                                          hasQualifyingRun ? "Y" : "N",
-                                         longestQRLen, qualifyingMin))
+                                         longestQRLen, qualifyingMin),
+                          comp: comp)
                 continue
             }
             guard comp.maxX >= gMin, comp.minX <= gMax else {
-                logReject("no_gate_intersection")
+                logReject("no_gate_intersection", comp: comp)
                 continue
             }
 
@@ -613,7 +615,8 @@ final class DetectionEngine {
                 && hFrac > flashGuardHFrac {
                 logReject("full_frame_flash",
                           detail: String(format: "cov=%.2f fill=%.2f wFrac=%.2f hFrac=%.2f",
-                                         coverage, fillRatio, wFrac, hFrac))
+                                         coverage, fillRatio, wFrac, hFrac),
+                          comp: comp)
                 continue
             }
 
@@ -649,7 +652,8 @@ final class DetectionEngine {
                     need_floor, pass_floor))
 
                 logReject("local_support",
-                          detail: "run=\(run) need=\(need)")
+                          detail: "run=\(run) need=\(need)",
+                          comp: comp)
                 continue
             }
 
@@ -696,7 +700,7 @@ final class DetectionEngine {
         // double-triggers when frame drops cause the time-based cooldown to expire
         // while the same person is still crossing.
         if gateOccupied {
-            logReject("gate_occupied")
+            logReject("gate_occupied", comp: candidate.comp)
             return nil
         }
 
@@ -826,34 +830,21 @@ final class DetectionEngine {
             for (tryN, q) in quals.enumerated() {
                 if q.width > 0 {
                     pickedIdx = q.idx
-                    let run = frameGateRunsMerged[q.idx]
-                    // §30 H-DETY-FRACTION-INSIDE-PICKED-RUN: 30% from top
-                    // of the picked merged run. Scale-invariant.
-                    //
-                    // §40 H-SHORT-RUN-STRETCH (shipped 2026-04-15). When
-                    // the picked run ends in the upper 60% of the blob
-                    // bbox, it's a head/shoulder/upper-chest run on a
-                    // hollow-torso frame (no torso qualifier formed),
-                    // and 30%-from-top lands on the forehead. Anchor at
-                    // 70%-from-top of the picked run instead — lands on
-                    // neck/upper-chest, closer to the real torso
-                    // position. Test WW L1/L7/L8 dry-run: Δy +62→+39,
-                    // +32→−6, +49→−17.
-                    let runSpan = run.endY - run.startY
-                    let blobBottom = candidate.comp.minY + candidate.comp.height
-                    let stretchTriggerY = candidate.comp.minY
-                        + Int(Float(candidate.comp.height) * shortRunStretchBlobFraction)
-                    let shortRunStretch = run.endY < stretchTriggerY
-                    let placementFraction: Float = shortRunStretch
-                        ? shortRunStretchFraction
-                        : 0.30
-                    torsoDetY = run.startY + Int(Float(runSpan) * placementFraction)
-                    if shortRunStretch {
-                        slog(String(format:
-                            "[SHORT_RUN_STRETCH] frame=%d pickedIdx=%d runEndY=%d blobBottom=%d stretchTriggerY=%d detY=%d fraction=%.2f",
-                            frameIndex, q.idx, run.endY, blobBottom,
-                            stretchTriggerY, torsoDetY, placementFraction))
-                    }
+                    // §48 H-DETY-BLOB-RELATIVE-ALWAYS (2026-04-16):
+                    // revert to the original §21 design. detY is a
+                    // property of the BODY (chest ≈ torsoFraction from
+                    // top of blob bbox), not of the picked gate-column
+                    // run. When the picker grabs a subset — head+torso
+                    // merged via §34 projection (Test ZZ Lap 4 Δy +22,
+                    // Lap 7 +27) or legs-only when torso fragments (Lap
+                    // 10 −60, Lap 11 −41) — detY must still land on the
+                    // chest. Computing from blob bbox makes placement
+                    // invariant to which run the picker happened to
+                    // select. Retires §30 H-DETY-FRACTION-INSIDE-PICKED-
+                    // RUN and §40 H-SHORT-RUN-STRETCH (§40 was itself a
+                    // workaround for the same bug this fix addresses).
+                    torsoDetY = candidate.comp.minY
+                        + Int(Float(candidate.comp.height) * torsoFraction)
                     if tryN > 0 {
                         slog(String(format:
                             "[EMPTY_STRIP_FALLBACK] frame=%d triedQualifiers=%d pickedIdx=%d detY=%d",
@@ -888,10 +879,12 @@ final class DetectionEngine {
                 if qualifyingCount == 0 {
                     let tallest = frameGateRunsMerged.map { $0.endY - $0.startY + 1 }.max() ?? 0
                     logReject("gate_col_run",
-                              detail: "tallest=\(tallest) need=\(minRequired)")
+                              detail: "tallest=\(tallest) need=\(minRequired)",
+                              comp: candidate.comp)
                 } else {
                     logReject("empty_strip",
-                              detail: "qualifiers=\(qualifyingCount) all_empty")
+                              detail: "qualifiers=\(qualifyingCount) all_empty",
+                              comp: candidate.comp)
                 }
                 return nil
             }
@@ -997,7 +990,8 @@ final class DetectionEngine {
                     slog("[EMPTY_STRIP_THICK_PASS] frame=\(frameIndex) detY=\(torsoDetY) gateColStrip=0 thickBand=x\(tMin)..x\(tMax) hasMask=Y action=allow")
                 } else {
                     slog("[EMPTY_STRIP] frame=\(frameIndex) detY=\(torsoDetY) stripWidth=0 thickBand=empty action=reject")
-                    logReject("empty_strip", detail: "detY=\(torsoDetY) thick=empty")
+                    logReject("empty_strip", detail: "detY=\(torsoDetY) thick=empty",
+                              comp: candidate.comp)
                     return nil
                 }
             } else {
@@ -1542,16 +1536,28 @@ final class DetectionEngine {
         for (ci, gx) in columns.enumerated() {
             var runStart = -1
             var runLen   = 0
+            var gapLen   = 0
             var best     = 0
             var bestMid  = 0
 
+            // §48 H-LS-INTRACOL-GAP-MERGE: tolerate up to
+            // `gateRunMergeMaxGap` mask=0 rows inside a column without
+            // resetting the run. Matches the fire-gate picker's own
+            // merge policy (line 436) so LS and the picker see the same
+            // gap structure. Evidence: Test ZZ f986 col-90 raw longest
+            // was 24 (sub-floor), but closing 1-px gaps in that column
+            // yields 28 (passes the 25 floor) — this is the far-distance
+            // rescue path.
             for y in comp.minY...comp.maxY {
                 if maskBuf[y * W + gx] != 0 {
                     if runStart < 0 { runStart = y }
-                    runLen += 1
+                    runLen += 1 + gapLen
+                    gapLen = 0
+                } else if runLen > 0 && gapLen < gateRunMergeMaxGap {
+                    gapLen += 1
                 } else {
                     if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
-                    runStart = -1; runLen = 0
+                    runStart = -1; runLen = 0; gapLen = 0
                 }
             }
             if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
@@ -1599,14 +1605,18 @@ final class DetectionEngine {
             let scanBot = min(ceilY, comp.maxY)
             if scanTop <= scanBot {
                 for (ci, gx) in columns.enumerated() {
-                    var runStart = -1, runLen = 0, best = 0, bestMid = 0
+                    var runStart = -1, runLen = 0, gapLen = 0, best = 0, bestMid = 0
+                    // §48: intra-column gap merging — mirror main-loop logic.
                     for y in scanTop...scanBot {
                         if maskBuf[y * W + gx] != 0 {
                             if runStart < 0 { runStart = y }
-                            runLen += 1
+                            runLen += 1 + gapLen
+                            gapLen = 0
+                        } else if runLen > 0 && gapLen < gateRunMergeMaxGap {
+                            gapLen += 1
                         } else {
                             if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
-                            runStart = -1; runLen = 0
+                            runStart = -1; runLen = 0; gapLen = 0
                         }
                     }
                     if runLen > best { best = runLen; bestMid = runStart + runLen / 2 }
@@ -2171,13 +2181,22 @@ final class DetectionEngine {
 
     // MARK: - Logging
 
-    private func logReject(_ reason: String, detail: String = "") {
+    private func logReject(_ reason: String, detail: String = "", comp: Component? = nil) {
         guard reason != lastRejectReason else { return }
         lastRejectReason = reason
+        // §46 Blob bbox on every REJECT so scenario root-cause
+        // (lean vs distance vs low-in-frame) is recoverable from
+        // logs alone. y=Y0..Y1 gives the full vertical extent;
+        // the existing gate-column logs only show pixels inside
+        // the gate band, which underestimates blob-top when the
+        // leading edge is in a different column.
+        let blob = comp.map {
+            " blob=\($0.width)x\($0.height) y=\($0.minY)..\($0.maxY) x=\($0.minX)..\($0.maxX)"
+        } ?? ""
         if detail.isEmpty {
-            slog("[REJECT] frame=\(frameIndex) \(reason)")
+            slog("[REJECT] frame=\(frameIndex) \(reason)\(blob)")
         } else {
-            slog("[REJECT] frame=\(frameIndex) \(reason) — \(detail)")
+            slog("[REJECT] frame=\(frameIndex) \(reason)\(blob) — \(detail)")
         }
     }
 }
