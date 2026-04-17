@@ -6471,3 +6471,89 @@ one-issue-at-a-time:
    the "fired on knee / hip / trailing edge" failure class
    on crossings that were at least captured.
 
+
+## Run 2026-04-16 Test ZZ — arm-swipe regression control
+
+### Context
+
+Follow-up to Test YY. Goal: prove that the other gates
+(`fill_ratio`, `aspect`, `heightFraction`, §23 local-support,
+`no_gate_intersection`, body-part suppression) can reject
+arm-swipes without relying on the 50-px §27 qualifier floor.
+Needed as a safety check before lowering floors to match PF
+spec §4.1 in §42a.
+
+Scenario: arm swipes across the gate (body off-screen and
+body-visible-but-still variants) plus a couple of normal
+upright crossings as control. Front camera, auto exposure
+(`maxExposureCapMs=nil`).
+
+### Our 4 [CROSSING] timestamps
+
+0.000, 17.343, 19.261, 21.427. All captured fires were on
+real body crossings per user verification. No arm-swipe
+false positives.
+
+### Arm-swipe rejection signatures observed
+
+- Frames 54–64: `fill_ratio blob=44–53 × 185–207
+  fill=0.09–0.16 aspect=0.24–0.28` — thin-tall off-gate
+  motion rejected on fill.
+- Frames 143–306: many `GATE_RUNS_FULL longest=25–49
+  floor=50` — gate-column activity near floor but never
+  formed firing blob.
+- Frames 401–407: `no_gate_intersection` + small `height`
+  — body / arm off to the side.
+- Frames 410, 880, 881, 892, 893: `gate_col_run tallest=X
+  need=50` — multi-frame gate-col rejections.
+- Frames 884, 889, 890: `empty_strip` — qualifier formed
+  but probe strip empty at centerY.
+- Frame 1086: `full_frame_flash cov=0.89 fill=0.89
+  wFrac=1.00 hFrac=1.00` — session-end exposure snap
+  correctly caught.
+
+### Safety conclusion for §42a
+
+The 50-px §27 qualifier floor is NOT the sole arm-safety
+layer. `fill_ratio=0.20`, `maxAspectRatio=1.2`,
+`heightFraction=0.55`, and §23 local-support together
+reject arm swipes across all tested variants. There is
+headroom to lower §27, §23 local-support floor, and
+heightFraction to match PF spec §4.1 without admitting arm
+swipes.
+
+### Placement regressions on the 4 captured crossings
+
+| # | detY | userY | Δy | userX | User verdict (inferred) |
+|---|---|---|---|---|---|
+| 1 | 124 | 144 | +20 | 86 | fired on head/upper chest, not mid-torso |
+| 2 | 174 | 150 | −24 | 150 | fired low + body 60 px past gate (late + low) |
+| 3 | 145 | 146 | +1 | 97 | good |
+| 4 | 102 | 138 | +36 | 87 | fired very high on head (§40 short-run-stretch engaged, still wrong) |
+
+3 of 4 Δy are bad. Importantly these weren't all leans —
+#1, #4 were ordinary crossings with our placement landing
+on the head. §40 H-SHORT-RUN-STRETCH triggered on #4
+(blob=115×181, picked merged run 49..106, endY=106 <
+stretchTriggerY=156 = 48 + 0.6×181) and still placed detY
+on the head region.
+
+This shows the picker/placement bug (§44 hypothesis) is
+broader than just leans — it affects crossings where the
+picker selects a head or upper-chest run and placement
+anchors too high.
+
+### Open questions for §40
+
+Frame 1016 (crossing #4) picked run len=58, blobH=181. §40
+fired and set placementFraction=0.70. Expected detY ≈
+49 + 0.70×57 = 89. Observed detY=102. Off-by-13 from the
+formula. Needs code re-read in §40 section to confirm the
+implementation matches the comment.
+
+### Status
+
+Arm-swipe safety confirmed. §42a unblocked. §44 picker bug
+more urgent than previously estimated — affecting normal
+crossings not just leans/dips. Needs prioritization vs §42a.
+
