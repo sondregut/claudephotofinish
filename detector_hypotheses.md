@@ -4981,3 +4981,61 @@ Needs its own controlled test after §42a ships.
 
 ---
 
+## §42a H-PF-PARITY-FLOOR — shipped 2026-04-16 (partial)
+
+### Scope of this ship
+
+Single-constant change: `torsoRunAbsMin: 50 → 30` in
+DetectionEngine.swift:135. Nothing else modified.
+
+- §23 `analyzeGate` local-support floor (25 px) UNCHANGED.
+- `heightFraction=0.55` blob prefilter UNCHANGED.
+- `torsoRunHeightFrac=0.25` and `torsoRunAbsMax=55`
+  UNCHANGED — the cap logic is unaffected.
+
+### Evidence basis
+
+Test YY frame 2859 (missed PF 56.41): `gate_col_run
+tallest=41 need=50`. Blob 107×184 passed prefilters and
+§23 analyzeGate, then §27 rejected on floor. With floor=30,
+this frame now fires.
+
+Spec §4.1: PF observed firing on ~6% frame-height gate-col
+runs (~19 px). Our new floor (30) is 9% — still more
+conservative than PF's documented tolerance.
+
+Test ZZ: arm-swipe rejection confirmed to operate via
+fill_ratio=0.20 + aspect=1.2 + heightFraction=0.55 + §23
+local-support, independently of the §27 floor. Safe to
+lower.
+
+### What this change does NOT fix
+
+- Test YY miss PF 12.79 — blocked primarily by §23
+  local-support (`run=19–21 need=25`). Needs separate
+  change.
+- Test YY miss PF 21.38 — some frames had no blob candidate
+  at all (heightFraction prefilter dropped compressed
+  blob). Needs heightFraction reduction.
+- Test YY miss PF 42.26 — §23 local-support primary blocker.
+- Placement bugs (§44 / §40 anomaly) — entirely separate
+  failure class, not touched.
+
+### Next test (after this ships)
+
+Physical test VV — same scenario as Test YY (outdoor,
+parallel PF, mix of normal + dips + leans). Goals:
+- Count recovered misses vs Test YY baseline (was 4
+  missed of 19).
+- Confirm no arm-swipe regression.
+- Observe whether placement bugs (§44/§40) still present on
+  captured crossings, including the recovered ones.
+
+### Status
+
+Shipped 2026-04-16. Partial §42a — §23 and heightFraction
+still pending until physical-test evidence confirms floor
+reduction alone is safe and partially effective.
+
+---
+

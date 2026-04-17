@@ -124,7 +124,16 @@ final class DetectionEngine {
     // Default ON (revert to false if it regresses).
     // See detector_hypotheses.md §23 and plans/calm-sprouting-meerkat.md.
     private let useLeadingEdgeTrigger: Bool = true
-    private let torsoRunAbsMin: Int = 50          // absolute floor for qualifying run length (px)
+    // §42a PF-PARITY FLOOR (2026-04-16). Lowered 50 → 30 after Test YY
+    // showed §27 floor rejecting dip/lean crossings at gate-col run
+    // lengths 41–49 where PF fires. Spec §4.1 documents PF triggering on
+    // ~6% frame-height (~19 px) gate-col runs when the parent blob is
+    // ≥30% frame-height; our 50-px floor was ~2.5× PF's observed
+    // tolerance. Test ZZ confirmed arm-swipe rejection does not depend
+    // on this floor — fill/aspect/heightFraction/analyzeGate catch
+    // swipes independently. 30 is a conservative middle ground at 9%
+    // frame-height, still stricter than PF's 6% observation.
+    private let torsoRunAbsMin: Int = 30          // absolute floor for qualifying run length (px)
     private let torsoRunHeightFrac: Float = 0.25  // fraction-of-blobH floor
     // §27 H-FLOOR-CAP (2026-04-15). Cap the fraction-of-blobH floor so
     // an inflated bbox (raised arms + stride + hair/feet at frame edge)
