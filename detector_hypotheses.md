@@ -5039,3 +5039,79 @@ reduction alone is safe and partially effective.
 
 ---
 
+## §48 H-DETY-BLOB-RELATIVE-ALWAYS — shipped 2026-04-16
+
+### What changed
+
+detY is now computed as `comp.minY + torsoFraction ×
+comp.height` unconditionally inside the §31 picker body,
+retiring §30 H-DETY-FRACTION-INSIDE-PICKED-RUN and §40
+H-SHORT-RUN-STRETCH. Placement no longer depends on which
+merged run the picker selected; it is a property of the
+blob bbox only.
+
+Code: DetectionEngine.swift line 855–856.
+
+### Retired hypotheses
+
+- **§30 H-DETY-FRACTION-INSIDE-PICKED-RUN** (shipped
+  2026-04-15) — detY = picked run startY + 0.30 × runSpan.
+  Worked when the picked run spanned torso; failed when
+  §34 thick projection merged head+torso or when legs
+  formed the qualifier.
+- **§40 H-SHORT-RUN-STRETCH** (shipped 2026-04-15) — when
+  run.endY < 0.6 × blobH, placement fraction became 0.70
+  instead of 0.30. Was itself a workaround for the
+  head-fire bug that §48 properly addresses at the root.
+
+### Why revert to §21 blob-relative
+
+§30 assumed the picker selected the "torso run." On
+leans, dips, and hollow-torso crossings this assumption
+fails — §34 projection or §31 widest-bias can pick a
+run that spans the whole body (head+torso merged) or
+just a leg cluster. When the picked run isn't the torso,
+§30's fraction places detY wherever the run happens to
+be.
+
+§48 decouples placement from picker. Picker's sole job
+is fire/no-fire. Placement is deterministic from the
+blob bbox geometry.
+
+### Consequences for Test ZZ placement analysis
+
+Test ZZ captured crossings Δy values (#1 +20, #2 −24,
+#4 +36) are the result of blob-bbox shape, not picker
+choice. When the blob bbox extends above the actual
+top-of-head (raised arms on a sprint) or below feet
+(frame edge), the 30% fraction misses the anatomical
+chest.
+
+### Re-framing §44 (picker-posture hypothesis)
+
+Original §44 targeted §31 torso-bias picker + §35 upper-
+half filter. Under §48, those two now only affect
+FIRE decisions, not placement. §44 needs re-hypothesizing
+as:
+
+- (a) Why does the blob bbox extend higher than
+  anatomical top-of-head on some crossings? (e.g.,
+  raised-arm sprint posture inflates bbox upward →
+  0.30 × height is now on the forehead not chest.)
+- (b) Could we use a blob feature other than bbox
+  (e.g., mass-weighted Y centroid, or highest row with
+  mask width ≥ torso-thickness) as the reference point
+  for the 0.30 fraction?
+
+Both are open questions. Requires its own physical test
+before proposing a fix.
+
+### Status
+
+Shipped 2026-04-16 as part of same body of work as §42a
+floor reduction. No separate hypothesis test run —
+§42a fire-rate is the priority metric for Test VV;
+placement Δy under §48 is secondary observation data.
+
+---
+

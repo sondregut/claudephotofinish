@@ -201,16 +201,11 @@ final class DetectionEngine {
     private let limbWaitReleaseAfter: Int = 3
     private var limbWaitStreak: Int = 0
 
-    // §40 H-SHORT-RUN-STRETCH (shipped 2026-04-15). When the picked §23
-    // qualifying run doesn't reach the lower portion of the blob bbox,
-    // it's a head/shoulder/upper-chest run on a hollow-torso frame, and
-    // §30's 30%-from-top placement lands on the forehead. Instead,
-    // anchor detY at 70%-from-top of the picked run (near the bottom of
-    // the run, i.e., neck/upper-chest) so the dot lands closer to the
-    // real torso. Trigger: picked run's endY falls in the upper 60% of
-    // the blob bbox.
-    private let shortRunStretchBlobFraction: Float = 0.6
-    private let shortRunStretchFraction: Float = 0.70
+    // §40 H-SHORT-RUN-STRETCH — RETIRED 2026-04-16 by §48
+    // H-DETY-BLOB-RELATIVE-ALWAYS. Constants left out; placement is
+    // now purely blob-bbox relative (comp.minY + torsoFraction ×
+    // comp.height) regardless of which qualifier run the picker
+    // selected. See detector_hypotheses.md §48.
 
     // Session state
     private(set) var isActive = false
@@ -289,7 +284,7 @@ final class DetectionEngine {
         case .absoluteFloor: pickerDesc = "floor\(absolutePickerFloor)"
         }
         slog(String(format:
-            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_picked_top gateAnalysisBand=±%d temporalWait=upperHalf limbWaitReleaseAfter=%d emptyStrip=col9_band shortRunStretch=blobTop+%.2f×H shortRunStretchFraction=%.2f",
+            "[ENGINE_CONFIG] picker=%@ cam=%@ process=%dx%d gate=col%d±%d_projected diffThresh=%d hFrac=%.2f wFrac=%.2f localSupport=%.2f fillStrict=%.2f aspStrict=%.1f fillLenient=%.2f aspLenient=%.1f torsoFrac=%.2f spikeRatio=%.1f warmup=%d cooldown=%.2fs leadingEdge=%@ torsoRunAbsMin=%d torsoRunAbsMax=%d torsoRunHeightFrac=%.2f gateRunMergeMaxGap=%d runPicker=torso_bias detY=0.30x_from_blob_top gateAnalysisBand=±%d temporalWait=upperHalf limbWaitReleaseAfter=%d emptyStrip=col9_band shortRunStretch=RETIRED_§48 shortRunStretchFraction=RETIRED_§48",
             pickerDesc, isFrontCamera ? "front" : "back",
             processWidth, processHeight, gateColumn, thickGateHalf,
             Int(diffThreshold), heightFraction, widthFraction,
@@ -301,8 +296,7 @@ final class DetectionEngine {
             useLeadingEdgeTrigger ? "ON" : "off",
             torsoRunAbsMin, torsoRunAbsMax, torsoRunHeightFrac, gateRunMergeMaxGap,
             gateBandHalf,
-            limbWaitReleaseAfter,
-            shortRunStretchBlobFraction, shortRunStretchFraction
+            limbWaitReleaseAfter
         ))
     }
 
